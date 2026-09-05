@@ -20,7 +20,8 @@ all of that in the page, in a panel you can pop onto a second monitor.
 - **Synced playback** of every lane through a single playhead; mute or solo lanes
 - **Drag to measure** any interval to three decimal places
 - **Download** the selected region as WAV, or the original file untouched
-- **Pop out** into a separate window you can drag to another monitor
+- **Open local files** — compare a recording from your disk against one from the page
+- **Its own window** you can drag to another monitor, independent of the tab
 - Finds audio through four routes, including Web Audio players that never create an
   `<audio>` element
 
@@ -55,7 +56,8 @@ The panel appears in the bottom-right as soon as audio is detected.
 | `⇄ Sync` | One time scale for all lanes — keep this on when comparing |
 | `Gain auto` | Vertical zoom, identical across lanes so loudness stays comparable |
 | `＋` / `－` | Lane height |
-| `⧉ Pop out` | Move the panel into its own window (drag it to a second monitor) |
+| `⊕ Files` | Open audio files from your computer (or just drag them onto the panel) |
+| `⧉ Window` | Open the panel as its own browser window — drag it to a second monitor |
 | `Rescan` / `Clear` | Scan the page again / remove all lanes |
 
 ### Per lane
@@ -78,9 +80,21 @@ The panel appears in the bottom-right as soon as audio is detected.
 | Drag with `↔ Shift` on, or holding Shift | Move that lane in time |
 | Double-click | Clear the selection |
 
+## The panel window
+
+`⧉ Window` opens the panel as a real browser window. Drag it to a second monitor
+and maximise it — the waveforms fill the screen and the lane height splits the
+available space.
+
+The window is a normal extension window, not a popup owned by the tab, so it
+survives navigating away and can be left open across practice sessions. Lanes the
+tab finds afterwards are pushed to it automatically, and you can open more files
+directly in the window with `⊕ Files` or by dropping them in.
+
 ## Comparing two recordings
 
 1. Play the reference clip — lane 1 appears. Pin it with `☆`.
+   (Or use `⊕ Files` / drag-and-drop if you already have the file on disk.)
 2. Play your own recording — lane 2 appears.
 3. Make sure `⇄ Sync` is on.
 4. Hit `⇱ Align`. Both onsets now start together.
@@ -109,14 +123,16 @@ media elements 2 · decoded 1 · audio requests 3 · page hook active
 
 - MSE / DRM-protected streams cannot be decoded
 - Files over 60 MB are skipped
-- A popped-out window belongs to its tab: closing or navigating that tab ends it
 - Max 4 lanes at once (oldest un-pinned lane is evicted)
+- Firefox 140+ / Chrome 109+
 
 ## Layout
 
 ```
 src/              shared source for both browsers
-  content.js      panel UI, rendering, transport, download
+  content.js      panel UI, rendering, transport, download — runs both as the
+                  content script and as the standalone panel window
+  panel.html      the standalone window
   page-hook.js    page-world hook, reports back via postMessage
   background.js   toolbar toggle + cross-origin audio proxy
 manifests/

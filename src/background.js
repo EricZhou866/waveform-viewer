@@ -7,9 +7,10 @@
  *   - service workers are terminated aggressively, so nothing is cached in
  *     module scope; the on/off flag always comes from storage.
  *
- * Two jobs:
+ * Three jobs:
  *   1. toolbar button = global on/off switch
  *   2. proxy audio downloads for the content script when page CORS blocks it
+ *   3. own the standalone panel window and the lane list handed to it
  */
 
 const api = (typeof browser !== 'undefined') ? browser : chrome;
@@ -53,6 +54,56 @@ action.onClicked.addListener(async () => {
   } catch (e) {}
 });
 
+/* ---- standalone panel window ----
+ * A real extension window, so the user can drag it to another monitor and it
+ * outlives the tab. The lane list is kept in storage rather than a module
+ * variable, because an MV3 service worker is torn down between messages.
+ */
+let panelWindowId = null;
+
+async function openPanel(lanes) {
+  try { await api.storage.local.set({ panelLanes: lanes || [] }); } catch (e) {}
+  try {
+    if (panelWindowId !== null) {
+      try {
+        await api.windows.update(panelWindowId, { focused: true });
+        return { ok: true, reused: true };
+      } catch (e) { panelWindowId = null; }
+    }
+    const w = await api.windows.create({
+      url: api.runtime.getURL('panel.html'),
+      type: 'popup',
+      width: 1100,
+      height: 640
+    });
+    panelWindowId = w.id;
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+}
+
+if (api.windows && api.windows.onRemoved) {
+  api.windows.onRemoved.addListener((id) => { if (id === panelWindowId) panelWindowId = null; });
+}
+
+/* A lane the tab found after the window was already open. Remember it (so a
+ * reopened window still has it) and forward it to the window if it is up. */
+async function rememberLane(lane) {
+  try {
+    const { panelLanes } = await api.storage.local.get('panelLanes');
+    const list = Array.isArray(panelLanes) ? panelLanes : [];
+    const key = lane.url || ('file:' + lane.label);
+    if (!list.some(l => (l.url || ('file:' + l.label)) === key)) {
+      list.push(lane);
+      while (list.length > 8) list.shift();
+      await api.storage.local.set({ panelLanes: list });
+    }
+  } catch (e) {}
+  if (panelWindowId === null) return;
+  try { await api.runtime.sendMessage({ type: 'wf:panelLaneFwd', lane }); } catch (e) {}
+}
+
 /* `return true` keeps the channel open for the async reply on both engines. */
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
@@ -63,6 +114,20 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'wf:fetch') {
     proxyFetch(msg.url).then(sendResponse);
     return true;
+  }
+  if (msg.type === 'wf:openPanel') {
+    openPanel(msg.lanes).then(sendResponse);
+    return true;
+  }
+  if (msg.type === 'wf:getPanelData') {
+    api.storage.local.get('panelLanes')
+      .then(({ panelLanes }) => sendResponse({ lanes: panelLanes || [] }))
+      .catch(() => sendResponse({ lanes: [] }));
+    return true;
+  }
+  if (msg.type === 'wf:panelLane') {
+    rememberLane(msg.lane);
+    return;
   }
 });
 

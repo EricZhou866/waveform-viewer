@@ -6,6 +6,14 @@ window.__wfViewerLoaded = true;
 
 const api = (typeof browser !== 'undefined') ? browser : chrome;
 
+/* Two contexts run this file:
+   - as a content script inside a web page (discovery + in-page panel)
+   - as the standalone panel window (panel.html), an extension page
+   The standalone window is a real browser window, so it can be moved to a
+   second monitor. Cross-window DOM adoption (the old approach) is not portable
+   across engines, so the panel window is its own page instead. */
+const IS_PANEL = /-extension:$/.test(location.protocol);
+
 const MAX_LANES = 4;
 const PEAK_RES  = 8192;
 const MIN_DUR   = 0.15;
@@ -23,7 +31,6 @@ let audioCtx = null;
 let laneH = 96, panelW = 640;
 let syncAxis = true, gainMode = 'auto', gainVal = 1;
 let moveMode = false;
-let popWin = null, popTimer = 0;
 /* The window the panel currently lives in: this page when docked, the popup when
    popped out. Drag handlers, rAF, DPI and sizing must all go through it, otherwise
    everything breaks once the panel is moved to another monitor. */
@@ -57,6 +64,16 @@ function nameFromUrl(u) {
     const p = new URL(u, location.href);
     return decodeURIComponent((p.pathname.split('/').pop() || '').trim()) || p.hostname;
   } catch { return 'audio'; }
+}
+
+function bufToB64(buf) {
+  const u8 = new Uint8Array(buf);
+  const CHUNK = 0x8000;
+  let out = '';
+  for (let i = 0; i < u8.length; i += CHUNK) {
+    out += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
+  }
+  return btoa(out);
 }
 
 function b64ToBuf(b64) {
@@ -160,6 +177,8 @@ function offer(spec) {
   if (ex) {
     let changed = false;
     if (spec.el && !ex.el) { ex.el = spec.el; wireMedia(ex); changed = true; }
+    if (spec.buffer && !ex.buffer) { ex.buffer = spec.buffer; changed = true; }
+    if (spec.raw && !ex.raw) { ex.raw = spec.raw; ex.mime = spec.mime || ex.mime; }
     if (spec.peaks && !ex.peaks) {
       ex.peaks = spec.peaks;
       ex.duration = spec.duration || spec.peaks.duration || 0;
@@ -280,14 +299,17 @@ function ensurePanel() {
   }
   host = document.createElement('div');
   host.id = '__wf_viewer_host';
-  host.style.cssText = 'position:fixed!important;z-index:2147483600!important;' +
-    'right:16px!important;bottom:16px!important;display:block!important;' +
-    'width:auto!important;height:auto!important;margin:0!important;padding:0!important;';
+  host.style.cssText = IS_PANEL
+    // Standalone window: the host IS the window.
+    ? 'position:static;display:block;width:100%;height:100vh;margin:0;padding:0;'
+    // Inside a page: float above everything, and defend against page CSS.
+    : 'position:fixed!important;z-index:2147483600!important;' +
+      'right:16px!important;bottom:16px!important;display:block!important;' +
+      'width:auto!important;height:auto!important;margin:0!important;padding:0!important;';
   document.body.appendChild(host);
 
   shadow = host.attachShadow({ mode: 'open' });
-  shadow.innerHTML = `
-    <style>
+  const PANEL_CSS = `
       * { box-sizing:border-box; margin:0; padding:0;
           font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif; }
       .panel { width:${panelW}px; background:#1b1f28; color:#e8edf6;
@@ -342,33 +364,62 @@ function ensurePanel() {
       /* popped out: fill the whole window */
       .panel.popped { width:100%!important; height:100vh; border:0; border-radius:0;
         display:flex; flex-direction:column; box-shadow:none; }
+      .panel.popped .bar, .panel.popped .tools { flex:0 0 auto; }
+      .panel.popped .status { flex:0 0 auto; }
       .panel.popped .bar { cursor:default; }
       .panel.popped .lanes { max-height:none; flex:1 1 auto; }
       .panel.popped .grip, .panel.popped [data-act="fold"] { display:none; }
-    </style>
-    <div class="panel">
-      <div class="bar">
-        <span class="title">Waveform <span class="count"></span></span>
-        <button class="btn" data-act="fold">－</button>
-      </div>
-      <div class="tools">
-        <button class="btn play" data-act="play">▶ Play</button>
-        <button class="btn" data-act="align" title="Shift every lane so their first sound lines up">⇱ Align</button>
-        <button class="btn" data-act="move" title="Drag the waveform sideways to shift a lane. Hold Shift to toggle temporarily.">↔ Shift</button>
-        <span class="sep"></span>
-        <button class="btn" data-act="sync" title="Share one time scale across all lanes">⇄ Sync</button>
-        <button class="btn" data-act="gain" title="Vertical zoom, identical for every lane">Gain auto</button>
-        <button class="btn" data-act="taller" title="Taller lanes">＋</button>
-        <button class="btn" data-act="shorter" title="Shorter lanes">－</button>
-        <span class="sep"></span>
-        <button class="btn" data-act="pop" title="Move the panel into its own window — drag it to a second monitor">⧉ Pop out</button>
-        <button class="btn" data-act="rescan" title="Scan the page again">Rescan</button>
-        <button class="btn" data-act="clear" title="Remove all lanes">Clear</button>
-      </div>
-      <div class="lanes"></div>
-      <div class="status"></div>
-      <div class="grip"></div>
-    </div>`;
+    `;
+
+  /* Built with createElement rather than innerHTML: no dynamic markup anywhere,
+     which keeps the add-on linters (and reviewers) happy. */
+  const mk = (tag, props) => {
+    const n = document.createElement(tag);
+    if (props) for (const k in props) {
+      if (k === 'dataset') { for (const d in props.dataset) n.dataset[d] = props.dataset[d]; }
+      else n[k] = props[k];
+    }
+    return n;
+  };
+
+  const styleEl = mk('style');
+  styleEl.textContent = PANEL_CSS;
+  shadow.appendChild(styleEl);
+
+  const panel = mk('div', { className: 'panel' });
+
+  const bar = mk('div', { className: 'bar' });
+  const title = mk('span', { className: 'title', textContent: 'Waveform ' });
+  const count = mk('span', { className: 'count' });
+  title.appendChild(count);
+  bar.appendChild(title);
+  bar.appendChild(mk('button', { className: 'btn', textContent: '\uff0d', dataset: { act: 'fold' } }));
+  panel.appendChild(bar);
+
+  const tools = mk('div', { className: 'tools' });
+    tools.appendChild(mk('button', { className: 'btn play', textContent: '▶ Play', title: 'Play every un-muted lane together', dataset: { act: 'play' } }));
+    tools.appendChild(mk('button', { className: 'btn', textContent: '⇱ Align', title: 'Shift every lane so their first sound lines up', dataset: { act: 'align' } }));
+    tools.appendChild(mk('button', { className: 'btn', textContent: '↔ Shift', title: 'Drag the waveform sideways to shift a lane. Hold Shift to toggle temporarily.', dataset: { act: 'move' } }));
+    tools.appendChild(mk('span', { className: 'sep' }));
+    tools.appendChild(mk('button', { className: 'btn', textContent: '⊕ Files', title: 'Open audio files from this computer', dataset: { act: 'files' } }));
+    tools.appendChild(mk('span', { className: 'sep' }));
+    tools.appendChild(mk('button', { className: 'btn', textContent: '⇄ Sync', title: 'Share one time scale across all lanes', dataset: { act: 'sync' } }));
+    tools.appendChild(mk('button', { className: 'btn', textContent: 'Gain auto', title: 'Vertical zoom, identical for every lane', dataset: { act: 'gain' } }));
+    tools.appendChild(mk('button', { className: 'btn', textContent: '＋', title: 'Taller lanes', dataset: { act: 'taller' } }));
+    tools.appendChild(mk('button', { className: 'btn', textContent: '－', title: 'Shorter lanes', dataset: { act: 'shorter' } }));
+    tools.appendChild(mk('span', { className: 'sep' }));
+    tools.appendChild(mk('button', { className: 'btn', textContent: '⧉ Window', title: 'Open the panel in its own window — move it to a second monitor', dataset: { act: 'pop' } }));
+    tools.appendChild(mk('button', { className: 'btn', textContent: 'Rescan', title: 'Scan the page again', dataset: { act: 'rescan' } }));
+    tools.appendChild(mk('button', { className: 'btn', textContent: 'Clear', title: 'Remove all lanes', dataset: { act: 'clear' } }));
+  panel.appendChild(tools);
+
+  const lanesEl  = mk('div', { className: 'lanes' });
+  const statusBar = mk('div', { className: 'status' });
+  const grip     = mk('div', { className: 'grip' });
+  panel.appendChild(lanesEl);
+  panel.appendChild(statusBar);
+  panel.appendChild(grip);
+  shadow.appendChild(panel);
 
   lanesBox = shadow.querySelector('.lanes');
   statusEl = shadow.querySelector('.status');
@@ -385,7 +436,8 @@ function ensurePanel() {
     else if (act === 'move')     { moveMode = !moveMode; e.target.classList.toggle('on', moveMode); applyCursorMode(); }
     else if (act === 'clear')    { stopAll(); [...lanes.keys()].forEach(dropLane); }
     else if (act === 'rescan')   { scanDom(); }
-    else if (act === 'pop')      { popWin && !popWin.closed ? dockBack() : popOut(); }
+    else if (act === 'pop')      { popOut(); }
+    else if (act === 'files')    { pickFiles(); }
     else if (act === 'taller' || act === 'shorter') {
       laneH = Math.max(56, Math.min(240, laneH + (act === 'taller' ? 26 : -26)));
       applySize();
@@ -404,10 +456,32 @@ function ensurePanel() {
 
   shadow.querySelector('[data-act="sync"]').classList.toggle('on', syncAxis);
   shadow.querySelector('[data-act="gain"]').classList.add('on');
-  makeDraggable(shadow.querySelector('.bar'));
-  makeResizable(shadow.querySelector('.grip'));
-  restoreGeometry();
+  if (IS_PANEL) {
+    panel.classList.add('popped');
+    ['pop', 'rescan', 'fold'].forEach(a => {
+      const b = shadow.querySelector('[data-act="' + a + '"]');
+      if (b) b.remove();
+    });
+    fitPanelWindow();
+    addEventListener('resize', fitPanelWindow);
+  } else {
+    makeDraggable(shadow.querySelector('.bar'));
+    makeResizable(shadow.querySelector('.grip'));
+    restoreGeometry();
+    wireDropZone();
+  }
   paintStatus();
+}
+
+/* Standalone window: fill it, and split the height between the lanes. */
+function fitPanelWindow() {
+  if (!shadow) return;
+  panelW = innerWidth;
+  const avail = Math.max(120, innerHeight - 34 - 40 - 26);
+  const n = Math.max(1, lanes.size);
+  laneH = Math.max(56, Math.min(420, Math.floor(avail / n) - 34));
+  shadow.querySelectorAll('canvas').forEach(c => { c.style.height = laneH + 'px'; });
+  refreshAll();
 }
 
 function applyCursorMode() {
@@ -417,9 +491,23 @@ function applyCursorMode() {
 
 function paintStatus() {
   if (!statusEl) return;
-  statusEl.innerHTML =
-    `media elements <b>${stat.media}</b> · decoded <b>${stat.dec}</b> · audio requests <b>${stat.url}</b>` +
-    ` · page hook <b>${stat.hook ? 'active' : 'blocked'}</b>`;
+  while (statusEl.firstChild) statusEl.removeChild(statusEl.firstChild);
+  const put = (label, value) => {
+    if (statusEl.childNodes.length) statusEl.appendChild(document.createTextNode(' \u00b7 '));
+    statusEl.appendChild(document.createTextNode(label + ' '));
+    const b = document.createElement('b');
+    b.textContent = String(value);
+    statusEl.appendChild(b);
+  };
+  if (IS_PANEL) {
+    put('lanes', lanes.size);
+    put('source', 'this window');
+  } else {
+    put('media elements', stat.media);
+    put('decoded', stat.dec);
+    put('audio requests', stat.url);
+    put('page hook', stat.hook ? 'active' : 'blocked');
+  }
   const empty = lanesBox.querySelector('.empty');
   if (!lanes.size && !empty) {
     const d = document.createElement('div');
@@ -431,7 +519,7 @@ function paintStatus() {
 
 function applySize() {
   if (!shadow) return;
-  shadow.querySelector('.panel').style.width = panelW + 'px';
+  if (!IS_PANEL) shadow.querySelector('.panel').style.width = panelW + 'px';
   shadow.querySelectorAll('canvas').forEach(c => { c.style.height = laneH + 'px'; });
   refreshAll();
   saveGeometry();
@@ -462,107 +550,111 @@ function refreshAll() {
   applyCursorMode();
 }
 
-function relayout() { if (popWin && !popWin.closed) fitPopped(); }
+function relayout() { if (IS_PANEL) fitPanelWindow(); }
 
-/* ============ pop the panel out into its own window (for a 2nd monitor) ============ */
-function popOut() {
-  if (!host) return;
-  if (popWin && !popWin.closed) { try { popWin.focus(); } catch (e) {} return; }
-
-  let w = null;
-  try {
-    w = window.open('', 'wfWaveformPanel',
-      'width=1100,height=640,menubar=no,toolbar=no,location=no,status=no,scrollbars=no,resizable=yes');
-  } catch (e) {}
-  if (!w) {
-    if (statusEl) statusEl.innerHTML =
-      '\u26a0 The popup was blocked. Allow popups for this site, then try again.';
-    return;
+/* ============ the standalone panel window ============
+ * The old approach moved the panel's DOM into a window.open() popup. That
+ * depends on cross-window DOM adoption, which is not portable — it fails on
+ * Firefox. Instead the background opens a real extension page (panel.html)
+ * running this same file in IS_PANEL mode, and the lanes are handed over as
+ * descriptors. The window is independent of the tab, so it also survives
+ * navigating away.
+ */
+function laneDescriptor(l) {
+  const d = {
+    url: l.url || '',
+    label: (l.nameEl && l.nameEl.textContent) || 'audio',
+    offset: l.offset || 0,
+    muted: !!l.muted
+  };
+  // Lanes with no URL (files opened from disk) have to travel as bytes.
+  if (!d.url && l.raw && l.raw.byteLength <= 8 * 1024 * 1024) {
+    d.b64 = bufToB64(l.raw);
+    d.mime = l.mime || '';
   }
+  return d;
+}
 
+async function popOut() {
   try {
-    w.document.open();
-    w.document.write(
-      '<!doctype html><html lang="zh"><head><meta charset="utf-8">' +
-      '<title>Waveform</title>' +
-      '<style>html,body{margin:0;padding:0;height:100%;background:#12151c;overflow:hidden}</style>' +
-      '</head><body></body></html>');
-    w.document.close();
-  } catch (e) {}
-
-  popWin = w;
-
-  // Move the whole panel (shadow DOM included) into the popup
-  try {
-    w.document.body.appendChild(w.document.adoptNode(host));
+    const r = await api.runtime.sendMessage({
+      type: 'wf:openPanel',
+      lanes: [...lanes.values()].filter(l => l.peaks).map(laneDescriptor)
+    });
+    if (r && r.ok === false) note('Could not open the window: ' + (r.error || 'unknown'));
   } catch (e) {
-    popWin = null;
-    try { w.close(); } catch (e2) {}
-    if (statusEl) statusEl.innerHTML = '\u26a0 Could not move the panel: ' + (e && e.message || e);
-    return;
+    note('Could not open the window: ' + ((e && e.message) || e));
   }
-
-  host.style.cssText = 'position:static!important;display:block!important;' +
-    'width:100%!important;height:100%!important;margin:0!important;padding:0!important;';
-  shadow.querySelector('.panel').classList.add('popped');
-  shadow.querySelector('.panel').classList.remove('collapsed');
-  const btn = shadow.querySelector('[data-act="pop"]');
-  if (btn) { btn.textContent = '⧉ Dock'; btn.classList.add('on'); }
-
-  const onResize = () => fitPopped();
-  w.addEventListener('resize', onResize);
-  w.addEventListener('beforeunload', () => dockBack(true));
-  w.addEventListener('keydown', onHotkey, true);
-
-  clearInterval(popTimer);
-  popTimer = setInterval(() => { if (!popWin || popWin.closed) dockBack(true); }, 800);
-
-  fitPopped();
-  setTimeout(fitPopped, 120);   // recompute once the window size has settled
 }
 
-/* Fill the popup window: width follows the window, lane height splits the remaining space */
-function fitPopped() {
-  if (!popWin || popWin.closed || !shadow) return;
-  panelW = popWin.innerWidth;
-  const chrome = 34 + 34 + 26;                 // title bar + toolbar + status bar
-  const avail = Math.max(120, popWin.innerHeight - chrome);
-  const n = Math.max(1, lanes.size);
-  laneH = Math.max(56, Math.min(420, Math.floor(avail / n) - 34));
-  shadow.querySelectorAll('canvas').forEach(c => { c.style.height = laneH + 'px'; });
-  refreshAll();
+/* Keep an open panel window in step with what the tab discovers. */
+function broadcastLane(lane) {
+  if (IS_PANEL || !lane.peaks) return;
+  try { api.runtime.sendMessage({ type: 'wf:panelLane', lane: laneDescriptor(lane) }); } catch (e) {}
 }
 
-function dockBack(fromClose) {
-  clearInterval(popTimer); popTimer = 0;
-  const w = popWin;
-  popWin = null;
-  if (!host || !shadow) return;
+/* Show a short message on the status bar without touching innerHTML. */
+function note(text) {
+  if (!statusEl) return;
+  while (statusEl.firstChild) statusEl.removeChild(statusEl.firstChild);
+  statusEl.appendChild(document.createTextNode('\u26a0 ' + text));
+  setTimeout(paintStatus, 6000);
+}
 
+/* ============ opening audio files from disk ============ */
+function pickFiles() {
+  const doc = (host && host.ownerDocument) || document;
+  const inp = doc.createElement('input');
+  inp.type = 'file';
+  inp.accept = 'audio/*,video/*,.mp3,.wav,.m4a,.ogg,.opus,.flac,.aac,.webm';
+  inp.multiple = true;
+  inp.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px';
+  doc.body.appendChild(inp);
+  inp.addEventListener('change', async () => {
+    const files = [...(inp.files || [])];
+    inp.remove();
+    for (const f of files) await addFile(f);
+  });
+  inp.click();
+}
+
+async function addFile(file) {
+  const key = 'file:' + file.name + ':' + file.size + ':' + (file.lastModified || 0);
+  if (lanes.has(key)) return;
   try {
-    if (document.body && host.ownerDocument !== document) {
-      document.body.appendChild(document.adoptNode(host));
-    }
-  } catch (e) {}
-
-  host.style.cssText = 'position:fixed!important;z-index:2147483600!important;' +
-    'right:16px!important;bottom:16px!important;display:block!important;' +
-    'width:auto!important;height:auto!important;margin:0!important;padding:0!important;';
-  shadow.querySelector('.panel').classList.remove('popped');
-  const btn = shadow.querySelector('[data-act="pop"]');
-  if (btn) { btn.textContent = '⧉ Pop out'; btn.classList.remove('on'); }
-
-  panelW = 640; laneH = 96;
-  try {
-    api.storage.local.get('geom').then(({ geom }) => {
-      if (geom) { panelW = geom.w || panelW; laneH = geom.h || laneH; }
-      shadow.querySelectorAll('canvas').forEach(c => { c.style.height = laneH + 'px'; });
-      applySize();
-    }).catch(() => applySize());
-  } catch (e) { applySize(); }
-
-  if (!fromClose && w && !w.closed) { try { w.close(); } catch (e) {} }
+    const buf = await file.arrayBuffer();
+    await addBytes(key, file.name, buf, file.type || guessMime(file.name));
+  } catch (e) {
+    note('Could not read ' + file.name + ': ' + ((e && e.message) || e));
+  }
 }
+
+/* Shared by the file picker and by lanes handed to the panel window as bytes. */
+async function addBytes(key, label, buf, mime) {
+  let audio;
+  try { audio = await actx().decodeAudioData(buf.slice(0)); }
+  catch (e) { note('Cannot decode ' + label + ' — unsupported codec'); return; }
+  const peaks = computePeaks(audio);
+  offer({
+    key, url: '', label, peaks, duration: peaks.duration,
+    buffer: audio, raw: buf, mime: mime || ''
+  });
+}
+
+/* Drag audio files straight onto the panel. */
+function wireDropZone() {
+  if (!host) return;
+  const doc = host.ownerDocument;
+  const stop = (e) => { e.preventDefault(); e.stopPropagation(); };
+  const target = IS_PANEL ? doc.body : host;
+  target.addEventListener('dragover', (e) => { stop(e); e.dataTransfer.dropEffect = 'copy'; });
+  target.addEventListener('drop', async (e) => {
+    stop(e);
+    const files = [...((e.dataTransfer && e.dataTransfer.files) || [])];
+    for (const f of files) await addFile(f);
+  });
+}
+
 
 /* dragging / resizing / persisted geometry */
 function makeDraggable(handle) {
@@ -597,7 +689,7 @@ function makeResizable(grip) {
 }
 
 function saveGeometry() {
-  if (popWin && !popWin.closed) return;
+  if (IS_PANEL) return;
   try {
     const r = host.getBoundingClientRect();
     api.storage.local.set({ geom: { left: r.left, top: r.top, w: panelW, h: laneH } });
@@ -666,10 +758,10 @@ function createLane(spec) {
     regEl: node.querySelector('.region'),
     wrap: node.querySelector('.wrap'),
     peaks: spec.peaks || null,
-    buffer: null,
+    buffer: spec.buffer || null,
     duration: spec.duration || (spec.peaks && spec.peaks.duration) || 0,
-    offset: 0, muted: false, pinned: false, raf: 0,
-    raw: null, mime: '', selA: null, selB: null
+    offset: spec.offset || 0, muted: !!spec.muted, pinned: false, raf: 0,
+    raw: spec.raw || null, mime: spec.mime || '', selA: null, selB: null
   };
   lanes.set(lane.key, lane);
 
@@ -701,10 +793,15 @@ function createLane(spec) {
   if (lane.el) wireMedia(lane);
   wireMouse(lane);
 
-  if (lane.url) loadPeaks(lane);      // Always fetch a full buffer so we can play it, even if preview peaks already arrived
+  if (lane.muted) setMute(lane, true);
+
+  // A URL lane still fetches the real file: full-resolution peaks plus a
+  // buffer we can play. Lanes that arrived as bytes already have both.
+  if (lane.url) loadPeaks(lane);
 
   refreshAll();
   relayout();
+  broadcastLane(lane);
 }
 
 function setMute(lane, on) {
@@ -862,6 +959,7 @@ async function loadPeaks(lane) {
   lane.peaks = peaks; lane.buffer = audio; lane.duration = peaks.duration;
   lane.metaEl.textContent = fmtSec(peaks.duration);
   refreshAll();
+  broadcastLane(lane);
 }
 
 function fail(lane, msg) {
@@ -1055,7 +1153,7 @@ function onHotkey(e) {
   if (!host || !lanes.size) return;
   const tag = (e.target && e.target.tagName) || '';
   if (/INPUT|TEXTAREA|SELECT/.test(tag) || (e.target && e.target.isContentEditable)) return;
-  if (e.code === 'Space' && (e.ctrlKey || e.metaKey || popWin)) { e.preventDefault(); toggleAll(); }
+  if (e.code === 'Space' && (e.ctrlKey || e.metaKey || IS_PANEL)) { e.preventDefault(); toggleAll(); }
 }
 addEventListener('keydown', onHotkey);
 
@@ -1065,21 +1163,54 @@ api.runtime.onMessage.addListener((msg) => {
     enabled = msg.enabled;
     if (!enabled) {
       stopAll();
-      if (popWin && !popWin.closed) { try { popWin.close(); } catch (e) {} popWin = null; }
-      clearInterval(popTimer);
       [...lanes.keys()].forEach(dropLane);
       if (host) { host.remove(); host = null; shadow = null; lanesBox = null; statusEl = null; }
     } else { ensurePanel(); scanDom(); }
   }
 });
 
-try {
-  api.runtime.sendMessage({ type: 'wf:getEnabled' })
-    .then((r) => { enabled = !r || r.enabled !== false; if (enabled) boot(); })
-    .catch(() => boot());
-} catch (e) { boot(); }
+if (IS_PANEL) {
+  bootPanelWindow();
+} else {
+  try {
+    api.runtime.sendMessage({ type: 'wf:getEnabled' })
+      .then((r) => { enabled = !r || r.enabled !== false; if (enabled) boot(); })
+      .catch(() => boot());
+  } catch (e) { boot(); }
+}
 
 function boot() { scanDom(); [400, 1200, 3000].forEach(t => setTimeout(scanDom, t)); }
+
+/* Panel window: no page to watch. Take the lanes handed over by the tab, then
+   listen for anything it finds afterwards. Files can also be opened here. */
+async function bootPanelWindow() {
+  document.title = 'Waveform';
+  ensurePanel();
+  wireDropZone();
+  let data = null;
+  try { data = await api.runtime.sendMessage({ type: 'wf:getPanelData' }); } catch (e) {}
+  for (const d of (data && data.lanes) || []) await adoptDescriptor(d);
+  paintStatus();
+}
+
+async function adoptDescriptor(d) {
+  if (!d) return;
+  if (d.url) {
+    offer({ key: 'src:' + d.url, url: d.url, label: d.label || nameFromUrl(d.url),
+            offset: d.offset || 0, muted: !!d.muted });
+  } else if (d.b64) {
+    const buf = b64ToBuf(d.b64);
+    const key = 'file:' + (d.label || 'audio') + ':' + buf.byteLength;
+    if (lanes.has(key)) return;
+    await addBytes(key, d.label || 'audio', buf, d.mime || '');
+    const l = lanes.get(key);
+    if (l) { l.offset = d.offset || 0; if (d.muted) setMute(l, true); refreshAll(); }
+  }
+}
+
+api.runtime.onMessage.addListener((msg) => {
+  if (IS_PANEL && msg && msg.type === 'wf:panelLaneFwd') adoptDescriptor(msg.lane);
+});
 
 addEventListener('resize', () => refreshAll());
 })();

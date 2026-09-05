@@ -26,6 +26,18 @@ audio URL and the computed peak envelope.
 Messages arriving from the page are treated as untrusted: the content script
 validates their shape and uses them only to draw a waveform.
 
+## The standalone panel window
+`⧉ Window` asks the background to open `panel.html` with `windows.create`. That
+page runs the same `content.js` in panel mode (it detects the extension origin).
+Lanes are handed over as descriptors — a URL, or base64 bytes for a file the user
+opened from disk — and the window decodes them locally. No cross-window DOM access
+is involved.
+
+## Local files
+`⊕ Files` and drag-and-drop use a plain `<input type="file">` / drop handler. Files
+are read with `File.arrayBuffer()`, decoded with `decodeAudioData`, and drawn.
+They are never uploaded.
+
 ## Code
 No build step, no minification, no bundler. The files in the package are the
 source files. Source layout and the build script (which only copies files and

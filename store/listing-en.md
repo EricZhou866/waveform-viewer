@@ -43,8 +43,11 @@ WHAT IT DOES
 • Download what you are looking at: the selected region as a WAV file, or the
   original audio file untouched.
 
-• Pop the panel into a separate browser window and drag it to a second monitor,
-  where waveforms fill the screen instead of hiding in a corner.
+• Open audio files straight from your computer, or drag them onto the panel, so
+  you can compare something you already have against what the page is playing.
+
+• Open the panel as its own browser window and drag it to a second monitor, where
+  waveforms fill the screen instead of hiding in a corner.
 
 HOW IT FINDS AUDIO
 
@@ -85,3 +88,9 @@ content, form data, cookies, or browsing history, and it transmits nothing.
 hosted scripts, no external libraries.
 
 **Data collected**: none. Please select "does not collect user data".
+
+**Firefox note**: the manifest declares
+`browser_specific_settings.gecko.data_collection_permissions.required = ["none"]`,
+which is Mozilla's required declaration for an add-on that collects nothing. That
+key needs Firefox 140 / Firefox for Android 142, which is why the minimum versions
+are set there.
