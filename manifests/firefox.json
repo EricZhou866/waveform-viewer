@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Draw waveforms for any audio on a page. Stack lanes, align onsets, play them together, measure gaps, download clips.",
   "author": "Eric Zhou",
-  "homepage_url": "https://github.com/",
+  "homepage_url": "https://github.com/EricZhou866/waveform-viewer",
 
   "browser_specific_settings": {
     "gecko": {
