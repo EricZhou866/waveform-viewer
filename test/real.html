@@ -1,0 +1,14 @@
+<!doctype html><meta charset="utf-8"><title>Web Audio only (no shim)</title>
+<style>body{font-family:system-ui;padding:40px;background:#f6f7f9}button{padding:8px 16px}</style>
+<h3>Real extension test — no &lt;audio&gt; element on this page</h3>
+<button id="p">Play</button>
+<script>
+document.getElementById('p').onclick = async () => {
+  const ctx = new AudioContext();
+  for (const f of ['ref.mp3','mine.mp3']) {
+    const buf = await (await fetch(f)).arrayBuffer();
+    const a = await ctx.decodeAudioData(buf);
+    const s = ctx.createBufferSource(); s.buffer = a;
+  }
+};
+</script>

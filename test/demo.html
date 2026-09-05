@@ -1,0 +1,37 @@
+<!doctype html><meta charset="utf-8"><title>Speaking practice</title>
+<style>
+ body{font-family:-apple-system,"Segoe UI",system-ui;margin:0;background:#f4f6f9;color:#1d2430}
+ .wrap{max-width:760px;margin:0 auto;padding:48px 32px}
+ h1{font-size:22px;margin:0 0 4px} .sub{color:#7a869c;font-size:13px;margin-bottom:28px}
+ .card{background:#fff;border:1px solid #e3e8f0;border-radius:12px;padding:18px 20px;margin-bottom:14px}
+ .row{display:flex;align-items:center;gap:14px}
+ .play{width:38px;height:38px;border-radius:19px;border:0;background:#2f6fd0;color:#fff;font-size:15px;cursor:pointer}
+ .lbl{font-weight:600;font-size:14px} .meta{color:#8b97ac;font-size:12px;margin-top:2px}
+ .bars{flex:1;height:34px;display:flex;align-items:center;gap:2px}
+ .bars i{display:block;width:3px;background:#c3d4ee;border-radius:2px}
+ .t{margin-top:14px;font-size:15px;letter-spacing:.3px}
+</style>
+<div class="wrap">
+  <h1>Repeat Sentence · practice</h1>
+  <div class="sub">Compare your recording with the model answer</div>
+  <div class="card"><div class="row">
+    <button class="play" data-f="ref.mp3">▶</button>
+    <div><div class="lbl">Model answer</div><div class="meta">score 90 · 6.7 s</div></div>
+    <div class="bars" id="b1"></div></div>
+    <div class="t">Just wait a minute, I will be with you shortly.</div></div>
+  <div class="card"><div class="row">
+    <button class="play" data-f="mine.mp3">▶</button>
+    <div><div class="lbl">Your recording</div><div class="meta">score 83 · 5.5 s</div></div>
+    <div class="bars" id="b2"></div></div>
+    <div class="t">Just wait a minute, I will be with you shortly.</div></div>
+</div>
+<script>
+for (const id of ['b1','b2']) { const e=document.getElementById(id);
+  for(let i=0;i<64;i++){const b=document.createElement('i');b.style.height=(4+Math.abs(Math.sin(i*0.7))*26|0)+'px';e.appendChild(b);} }
+const ctx = new AudioContext();
+document.querySelectorAll('.play').forEach(btn => btn.onclick = async () => {
+  const buf = await (await fetch(btn.dataset.f)).arrayBuffer();
+  const a = await ctx.decodeAudioData(buf);
+  const s = ctx.createBufferSource(); s.buffer = a; s.connect(ctx.destination); s.start();
+});
+</script>
