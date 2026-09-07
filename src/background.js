@@ -41,18 +41,21 @@ api.runtime.onInstalled.addListener(paintButton);
 api.runtime.onStartup && api.runtime.onStartup.addListener(paintButton);
 paintButton();
 
-action.onClicked.addListener(async () => {
+async function toggleEnabled() {
   const next = !(await isEnabled());
   await api.storage.local.set({ enabled: next });
   await paintButton();
-  try {
-    const tabs = await api.tabs.query({});
-    for (const t of tabs) {
-      try { await api.tabs.sendMessage(t.id, { type: 'wf:enabled', enabled: next }); }
-      catch (e) { /* tab has no content script — fine */ }
-    }
-  } catch (e) {}
-});
+  // Turning it off must leave nothing behind: in-page panels and the
+  // standalone window all go away.
+  if (!next) {
+    await closePanelWindow();
+    try { await api.storage.local.set({ panelLanes: [] }); } catch (e) {}
+  }
+  await broadcastTabs({ type: 'wf:enabled', enabled: next });
+  return next;
+}
+
+action.onClicked.addListener(toggleEnabled);
 
 /* ---- standalone panel window ----
  * A real extension window, so the user can drag it to another monitor and it
@@ -60,48 +63,120 @@ action.onClicked.addListener(async () => {
  * variable, because an MV3 service worker is torn down between messages.
  */
 let panelWindowId = null;
+let panelTabId = null;   // the tab whose lanes the window mirrors
 
-async function openPanel(lanes) {
-  try { await api.storage.local.set({ panelLanes: lanes || [] }); } catch (e) {}
+async function broadcastTabs(msg) {
   try {
-    if (panelWindowId !== null) {
-      try {
-        await api.windows.update(panelWindowId, { focused: true });
-        return { ok: true, reused: true };
-      } catch (e) { panelWindowId = null; }
+    const tabs = await api.tabs.query({});
+    for (const t of tabs) {
+      try { await api.tabs.sendMessage(t.id, msg); } catch (e) { /* no content script */ }
     }
-    const w = await api.windows.create({
-      url: api.runtime.getURL('panel.html'),
-      type: 'popup',
-      width: 1100,
-      height: 640
-    });
-    panelWindowId = w.id;
-    return { ok: true };
+  } catch (e) {}
+}
+
+async function closePanelWindow() {
+  const id = panelWindowId;
+  panelWindowId = null;
+  if (id === null) return;
+  try { await api.windows.remove(id); } catch (e) {}
+}
+
+/* Rebuild the lane list from primitives before it touches storage. A value that
+   cannot be coerced is dropped; nothing here is allowed to stop the window from
+   opening. */
+function sanitizeLanes(list) {
+  const out = [];
+  if (!Array.isArray(list)) return out;
+  for (const d of list) {
+    try {
+      if (!d) continue;
+      const p = {
+        url: String(d.url || ''),
+        label: String(d.label || 'audio'),
+        offset: Number(d.offset) || 0,
+        muted: !!d.muted
+      };
+      if (typeof d.b64 === 'string' && d.b64) { p.b64 = d.b64; p.mime = String(d.mime || ''); }
+      if (d.unavailable) p.unavailable = true;
+      out.push(p);
+    } catch (e) { /* skip this one */ }
+  }
+  return out;
+}
+
+async function showWindow() {
+  if (panelWindowId !== null) {
+    try {
+      await api.windows.update(panelWindowId, { focused: true });
+      return true;
+    } catch (e) { panelWindowId = null; }
+  }
+  const w = await api.windows.create({
+    url: api.runtime.getURL('panel.html'),
+    type: 'popup',
+    width: 1100,
+    height: 640
+  });
+  panelWindowId = w.id;
+  return true;
+}
+
+async function openPanel(lanes, tabId) {
+  panelTabId = (tabId === undefined) ? panelTabId : tabId;
+
+  // The window comes first. Whatever happens to the payload, the user asked for
+  // a window and must get one.
+  try {
+    await showWindow();
   } catch (e) {
     return { ok: false, error: String((e && e.message) || e) };
   }
+
+  // Snapshot is only a fallback for when the tab has gone away; the live list is
+  // pulled from the tab on demand.
+  let partial = false;
+  try {
+    await api.storage.local.set({ panelLanes: sanitizeLanes(lanes) });
+  } catch (e) {
+    partial = true;
+    try { await api.storage.local.set({ panelLanes: [] }); } catch (e2) {}
+  }
+
+  broadcastTabs({ type: 'wf:panelOpen' });
+  return partial ? { ok: true, partial: true } : { ok: true };
 }
 
 if (api.windows && api.windows.onRemoved) {
-  api.windows.onRemoved.addListener((id) => { if (id === panelWindowId) panelWindowId = null; });
+  api.windows.onRemoved.addListener((id) => {
+    if (id !== panelWindowId) return;
+    panelWindowId = null;
+    panelTabId = null;
+    broadcastTabs({ type: 'wf:panelClosed' });   // give the in-page panel back
+  });
 }
 
-/* A lane the tab found after the window was already open. Remember it (so a
- * reopened window still has it) and forward it to the window if it is up. */
-async function rememberLane(lane) {
+/* A lane the tab found after the window was already open — just forward it.
+ * Nothing is accumulated here: a lane that is later merged away or removed must
+ * not survive in a stale list. */
+async function forwardLane(lane) {
+  if (panelWindowId === null) return;
+  const clean = sanitizeLanes([lane])[0];
+  if (!clean) return;
+  try { await api.runtime.sendMessage({ type: 'wf:panelLaneFwd', lane: clean }); } catch (e) {}
+}
+
+/* Ask the tab for the lanes it has right now. */
+async function currentLanes() {
+  if (panelTabId !== null) {
+    try {
+      const r = await api.tabs.sendMessage(panelTabId, { type: 'wf:collectLanes' });
+      if (r && Array.isArray(r.lanes)) return sanitizeLanes(r.lanes);
+    } catch (e) { /* tab closed or navigated */ }
+  }
   try {
     const { panelLanes } = await api.storage.local.get('panelLanes');
-    const list = Array.isArray(panelLanes) ? panelLanes : [];
-    const key = lane.url || ('file:' + lane.label);
-    if (!list.some(l => (l.url || ('file:' + l.label)) === key)) {
-      list.push(lane);
-      while (list.length > 8) list.shift();
-      await api.storage.local.set({ panelLanes: list });
-    }
-  } catch (e) {}
-  if (panelWindowId === null) return;
-  try { await api.runtime.sendMessage({ type: 'wf:panelLaneFwd', lane }); } catch (e) {}
+    return sanitizeLanes(panelLanes);
+  } catch (e) { return []; }
 }
 
 /* `return true` keeps the channel open for the async reply on both engines. */
@@ -116,17 +191,15 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg.type === 'wf:openPanel') {
-    openPanel(msg.lanes).then(sendResponse);
+    openPanel(msg.lanes, sender && sender.tab ? sender.tab.id : undefined).then(sendResponse);
     return true;
   }
   if (msg.type === 'wf:getPanelData') {
-    api.storage.local.get('panelLanes')
-      .then(({ panelLanes }) => sendResponse({ lanes: panelLanes || [] }))
-      .catch(() => sendResponse({ lanes: [] }));
+    currentLanes().then((lanes) => sendResponse({ lanes })).catch(() => sendResponse({ lanes: [] }));
     return true;
   }
   if (msg.type === 'wf:panelLane') {
-    rememberLane(msg.lane);
+    forwardLane(msg.lane);
     return;
   }
 });

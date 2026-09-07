@@ -1,0 +1,17 @@
+# System files
+.DS_Store
+Thumbs.db
+
+# Dependency directories
+node_modules/
+target/
+vendor/
+
+# Build and log outputs
+dist/
+build/
+*.log
+
+# Environment and secrets
+.env
+.env.local

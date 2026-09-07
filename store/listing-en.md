@@ -30,9 +30,13 @@ WHAT IT DOES
 • Shares one time scale across all lanes, so two recordings line up vertically and
   differences in pacing are obvious at a glance.
 
-• One-click onset alignment shifts every lane so their first audible moment starts
-  together. You can also drag any lane sideways to align it by hand, with the exact
-  offset shown in milliseconds.
+• One click crops the silence off both ends of every clip and starts them
+  together, so what you compare is the speech and not the dead air. You can also
+  drag any lane sideways by hand, with the exact offset shown in milliseconds.
+
+• Settings for how many lanes to compare at once (up to 8), the shared time
+  scale, vertical zoom and how aggressively silence is cropped. Audio found while
+  the panel is full waits its turn instead of being thrown away.
 
 • Plays every lane together through a single synced playhead, so you hear the
   comparison instead of guessing. Mute or solo individual lanes while it plays.

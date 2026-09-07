@@ -33,6 +33,18 @@ Lanes are handed over as descriptors — a URL, or base64 bytes for a file the u
 opened from disk — and the window decodes them locally. No cross-window DOM access
 is involved.
 
+## De-duplication
+Sites commonly create a fresh `blob:` URL for each playback of the same clip, so
+the URL is not an identity. Lanes are fingerprinted from the decoded audio
+(duration plus a coarse 32-bucket loudness shape) and merged when they match. The
+fingerprint is computed locally and never leaves the browser.
+
+## Handing audio to the panel window
+A `blob:` URL belongs to the page and cannot be fetched from an extension page, so
+those lanes are transferred as bytes. Two sources are tried: the original file
+bytes if they can be read, otherwise a WAV re-encoded from the AudioBuffer the
+extension decoded itself. All of it stays inside the browser.
+
 ## Local files
 `⊕ Files` and drag-and-drop use a plain `<input type="file">` / drop handler. Files
 are read with `File.arrayBuffer()`, decoded with `decodeAudioData`, and drawn.

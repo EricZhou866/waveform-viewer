@@ -14,7 +14,16 @@ const api = (typeof browser !== 'undefined') ? browser : chrome;
    across engines, so the panel window is its own page instead. */
 const IS_PANEL = /-extension:$/.test(location.protocol);
 
-const MAX_LANES = 4;
+/* User-visible settings, persisted in extension storage. */
+const DEFAULTS = {
+  maxLanes: 4,          // how many lanes can be on screen at once
+  whenFull: 'keep',     // 'keep' = never discard silently | 'replace' = evict oldest
+  sync: true,           // one shared time scale across lanes
+  gain: 'auto',         // 'auto' | 1 | 2 | 4 | 8
+  trimOnAlign: true,    // Align also crops leading/trailing silence
+  trimThresh: 0.08      // silence threshold, fraction of the clip's own peak
+};
+let cfg = Object.assign({}, DEFAULTS);
 const PEAK_RES  = 8192;
 const MIN_DUR   = 0.15;
 
@@ -29,7 +38,16 @@ let enabled = true;
 let host = null, shadow = null, lanesBox = null, statusEl = null;
 let audioCtx = null;
 let laneH = 96, panelW = 640;
-let syncAxis = true, gainMode = 'auto', gainVal = 1;
+let gainVal = 1;
+/* Audio found while the panel was full. Nothing is thrown away: it waits here
+   and slots in as soon as a lane frees up or the limit is raised. */
+const parked = [];
+const PARK_MAX = 12;
+
+/* Sources that turned out not to be usable audio — typically the silent
+   `data:` primer many players fire before every playback to unlock the audio
+   context. Remembered so they are not fetched and decoded over and over. */
+const rejected = new Set();
 let moveMode = false;
 /* The window the panel currently lives in: this page when docked, the popup when
    popped out. Drag handlers, rAF, DPI and sizing must all go through it, otherwise
@@ -58,7 +76,7 @@ const srcOf = (el) => { try { return el.currentSrc || el.src || ''; } catch { re
 
 function nameFromUrl(u) {
   if (!u) return 'audio';
-  if (u.startsWith('blob:')) return 'blob audio';
+  if (u.startsWith('blob:')) return 'clip ' + (lanes.size + 1);
   if (u.startsWith('data:')) return 'data audio';
   try {
     const p = new URL(u, location.href);
@@ -66,14 +84,19 @@ function nameFromUrl(u) {
   } catch { return 'audio'; }
 }
 
+/* Returns '' instead of throwing. On Firefox an ArrayBuffer that came from
+   another compartment makes `new Uint8Array(buf)` raise "Permission denied to
+   access property constructor", and that must never take the caller down. */
 function bufToB64(buf) {
-  const u8 = new Uint8Array(buf);
-  const CHUNK = 0x8000;
-  let out = '';
-  for (let i = 0; i < u8.length; i += CHUNK) {
-    out += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
-  }
-  return btoa(out);
+  try {
+    const u8 = new Uint8Array(buf);
+    const CHUNK = 0x8000;
+    let out = '';
+    for (let i = 0; i < u8.length; i += CHUNK) {
+      out += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
+    }
+    return out ? btoa(out) : '';
+  } catch (e) { return ''; }
 }
 
 function b64ToBuf(b64) {
@@ -120,8 +143,9 @@ window.addEventListener('message', (e) => {
       maxs: Float32Array.from(d.maxs),
       duration: Number(d.duration) || 0
     };
-    if (!peaks.duration) return;
+    if (!(peaks.duration >= MIN_DUR)) return;      // silent primer, ignore
     const url = typeof d.url === 'string' ? d.url : '';
+    if (url && isJunkSource(url)) return;
     offer({
       key: url ? 'src:' + url : id,
       url,
@@ -133,6 +157,13 @@ window.addEventListener('message', (e) => {
 });
 
 /* ============================ discovery ============================ */
+/* Manual recovery: re-scan the DOM and ask the page-world hook to re-announce
+   the audio it has seen, for sites that replay without a fresh request. */
+function rescan() {
+  scanDom();
+  try { window.postMessage({ __wfCmd: 'rescan' }, '*'); } catch (e) {}
+}
+
 function scanDom() {
   try { document.querySelectorAll('audio, video').forEach(offerMedia); } catch (e) {}
   paintStatus();
@@ -164,8 +195,19 @@ function offerMedia(el) {
   offer({ key: 'src:' + url, url, label: nameFromUrl(url), el });
 }
 
+/* A `data:` URI this small cannot hold anything worth drawing — it is a primer
+   clip, not content. Filtered before a lane is ever built. */
+const TINY_DATA_URI = 3000;
+
+function isJunkSource(url) {
+  if (!url) return true;
+  if (rejected.has(url)) return true;
+  if (url.startsWith('data:') && url.length < TINY_DATA_URI) return true;
+  return false;
+}
+
 function offerUrl(url) {
-  if (!enabled || !url) return;
+  if (!enabled || !url || isJunkSource(url)) return;
   const key = 'src:' + url;
   if (!lanes.has(key)) stat.url++;
   offer({ key, url, label: nameFromUrl(url) });
@@ -173,6 +215,7 @@ function offerUrl(url) {
 
 function offer(spec) {
   if (!enabled) return;
+  if (spec.url && isJunkSource(spec.url)) return;
   const ex = lanes.get(spec.key);
   if (ex) {
     let changed = false;
@@ -192,28 +235,37 @@ function offer(spec) {
 }
 
 /* ============================ timeline ============================ */
+/* The visible span is decided by the clips themselves, never by their offsets.
+   That is what makes Shift feel right: the ruler stays put and the waveform
+   slides across it. (Previously the span grew with the offsets, so the axis
+   rescaled and the waveform appeared frozen.) */
 function timeline() {
-  let t0 = 0, t1 = 0.1;
-  for (const l of lanes.values()) {
-    if (!l.duration) continue;
-    t0 = Math.min(t0, l.offset);
-    t1 = Math.max(t1, l.offset + l.duration);
-  }
-  return { t0, t1, span: Math.max(0.1, t1 - t0) };
+  let span = 0.1;
+  for (const l of lanes.values()) span = Math.max(span, visDur(l));
+  return { t0: 0, t1: span, span };
+}
+
+/* Visible length of a lane: the whole clip, or just the trimmed region. */
+function visDur(lane) {
+  const full = lane.duration || (lane.el && lane.el.duration) || 0;
+  if (lane.trimB == null) return full;
+  return Math.max(0.05, lane.trimB - lane.trimA);
 }
 
 function laneAxis(lane) {
-  if (syncAxis) { const g = timeline(); return { t0: g.t0, span: g.span }; }
-  return { t0: 0, span: Math.max(0.1, lane.duration || 0.1) };
+  if (cfg.sync) { const g = timeline(); return { t0: g.t0, span: g.span }; }
+  return { t0: 0, span: Math.max(0.1, visDur(lane)) };
 }
 
 /* ======================= playback engine (Web Audio) ======================= */
-function stopAll(keepPos) {
+/* stopAll()      — stop and stay where you are (used when restarting)
+   stopAll(true)  — stop and rewind to the start (used when playback ends) */
+function stopAll(rewind) {
   T.sources.forEach(s => { try { s.stop(); } catch (e) {} });
   T.sources = [];
   T.playing = false;
   winOf().cancelAnimationFrame(T.raf);
-  // T.pos is intentionally kept
+  if (rewind) T.pos = timeline().t0;
   paintTransport();
   paintAllCursors();
 }
@@ -221,7 +273,7 @@ function stopAll(keepPos) {
 function playAll(fromPos) {
   const ctx = actx();
   if (ctx.state === 'suspended') ctx.resume();
-  stopAll(true);
+  stopAll();          // stop whatever is running, keep the requested position
 
   // Pause the page's own player so we don't hear two copies at once
   for (const l of lanes.values()) if (l.el && !l.el.paused) { try { l.el.pause(); } catch (e) {} }
@@ -234,12 +286,14 @@ function playAll(fromPos) {
   let any = false;
   for (const l of lanes.values()) {
     if (!l.buffer || l.muted) continue;
-    const s = l.offset, e = l.offset + l.duration;
+    const s = l.offset, e = l.offset + visDur(l);
     if (pos >= e) continue;
     const src = ctx.createBufferSource();
     src.buffer = l.buffer;
     src.connect(ctx.destination);
-    src.start(now + Math.max(0, s - pos), Math.max(0, pos - s));
+    // Play from the trimmed start, so cropped silence is really skipped.
+    const into = (l.trimA || 0) + Math.max(0, pos - s);
+    src.start(now + Math.max(0, s - pos), into, Math.max(0.01, visDur(l) - Math.max(0, pos - s)));
     T.sources.push(src);
     any = true;
   }
@@ -254,12 +308,12 @@ function tickTransport() {
   const ctx = actx();
   const g = timeline();
   T.pos = T.posStart + (ctx.currentTime - T.ctxStart);
-  if (T.pos >= g.t1) { T.pos = g.t0; stopAll(); return; }
+  if (T.pos >= g.t1) { stopAll(true); return; }   // reached the end: rewind
   paintAllCursors();
   T.raf = winOf().requestAnimationFrame(tickTransport);
 }
 
-function toggleAll() { T.playing ? stopAll() : playAll(); }
+function toggleAll() { T.playing ? stopAll(true) : playAll(); }
 
 function paintTransport() {
   if (!shadow) return;
@@ -269,24 +323,90 @@ function paintTransport() {
 
 function paintAllCursors() { for (const l of lanes.values()) paintCursor(l); }
 
-/* Align onsets: shift every lane so its first audible moment lands at the same time */
-function alignOnsets() {
-  const info = [];
-  for (const l of lanes.values()) {
-    if (!l.peaks || !l.duration) continue;
-    const { mins, maxs } = l.peaks, N = mins.length;
-    let peak = 0;
-    for (let i = 0; i < N; i++) peak = Math.max(peak, maxs[i], -mins[i]);
-    const thr = peak * 0.12;
-    let idx = 0;
-    for (let i = 0; i < N; i++) {
-      if (Math.max(maxs[i], -mins[i]) > thr) { idx = i; break; }
-    }
-    info.push({ lane: l, onset: idx / N * l.duration });
+/* Align: crop the silence at both ends of every clip, then start them all at
+   zero. Cropping is what actually lines the speech up — once the dead air is
+   gone, "aligned" and "starts at 0" are the same thing. Click again to undo. */
+function soundBounds(lane) {
+  const { mins, maxs } = lane.peaks;
+  const n = mins.length;
+  if (!n) return null;
+
+  // Work on a smoothed envelope. A single click or a stray blip in the tail
+  // should not keep two seconds of near-silence alive.
+  const env = new Float32Array(n);
+  for (let i = 0; i < n; i++) env[i] = Math.max(maxs[i], -mins[i]);
+  const K = Math.max(1, Math.round(n / 400));      // ~0.25% of the clip
+  const sm = new Float32Array(n);
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    acc += env[i];
+    if (i >= K) acc -= env[i - K];
+    sm[i] = acc / Math.min(K, i + 1);
   }
-  if (info.length < 1) return;
-  const target = Math.max(...info.map(x => x.onset));
-  info.forEach(x => { x.lane.offset = target - x.onset; });
+
+  let peak = 0;
+  for (let i = 0; i < n; i++) if (sm[i] > peak) peak = sm[i];
+  if (peak < 1e-5) return null;
+
+  const thr = peak * cfg.trimThresh;
+  // Sound has to hold for a moment before it counts, so quiet crackle at the
+  // ends is cropped along with the true silence.
+  const run = Math.max(2, Math.round(n / 200));    // ~0.5% of the clip
+
+  let a = -1;
+  for (let i = 0; i + run <= n; i++) {
+    let held = true;
+    for (let j = i; j < i + run; j++) if (sm[j] <= thr) { held = false; break; }
+    if (held) { a = i; break; }
+  }
+  let b = -1;
+  for (let i = n - 1; i - run >= 0; i--) {
+    let held = true;
+    for (let j = i; j > i - run; j--) if (sm[j] <= thr) { held = false; break; }
+    if (held) { b = i; break; }
+  }
+  if (a < 0 || b < 0 || b <= a) return null;
+
+  const dur = lane.duration;
+  const pad = 0.05;                                 // keep a hair of air
+  const A = Math.max(0, (a / n) * dur - pad);
+  const B = Math.min(dur, ((b + 1) / n) * dur + pad);
+  if (B - A < 0.15) return null;                    // refuse silly-short crops
+  return { a: A, b: B };
+}
+
+function isTrimmed() {
+  for (const l of lanes.values()) if (l.trimB != null) return true;
+  return false;
+}
+
+function alignOnsets() {
+  const on = !isTrimmed();
+  for (const l of lanes.values()) {
+    l.offset = 0;
+    l.selA = l.selB = null;
+    l.regEl.style.display = 'none';
+    l.selEl.textContent = '';
+    if (!on || !l.peaks || !cfg.trimOnAlign) { l.trimA = 0; l.trimB = null; continue; }
+    const b = soundBounds(l);
+    if (b) { l.trimA = b.a; l.trimB = b.b; } else { l.trimA = 0; l.trimB = null; }
+  }
+  // With trimming off, fall back to lining up the onsets by offset instead.
+  if (on && !cfg.trimOnAlign) {
+    const info = [];
+    for (const l of lanes.values()) {
+      if (!l.peaks) continue;
+      const b = soundBounds(l);
+      info.push({ lane: l, onset: b ? b.a : 0 });
+    }
+    if (info.length) {
+      const target = Math.max(...info.map(x => x.onset));
+      info.forEach(x => { x.lane.offset = target - x.onset; });
+    }
+  }
+  T.pos = 0;
+  const btn = shadow && shadow.querySelector('[data-act="align"]');
+  if (btn) btn.classList.toggle('on', isTrimmed());
   refreshAll();
 }
 
@@ -360,7 +480,18 @@ function ensurePanel() {
       .grip { height:12px; background:#232936; cursor:nwse-resize; display:flex;
         align-items:center; justify-content:center; border-top:1px solid #39404e; }
       .grip::after { content:''; width:34px; height:3px; border-radius:2px; background:#4a556b; }
-      .collapsed .lanes, .collapsed .grip, .collapsed .status, .collapsed .tools { display:none; }
+      .collapsed .lanes, .collapsed .grip, .collapsed .status, .collapsed .tools,
+      .collapsed .sheet { display:none; }
+      .sheet { background:#191d25; border-top:1px solid #2c3341; padding:4px 0 8px; }
+      .sheetHead { display:flex; align-items:center; justify-content:space-between;
+        padding:8px 12px 6px; font-size:12px; font-weight:600; color:#dbe4f3; }
+      .row { display:flex; align-items:center; gap:12px; padding:5px 12px; }
+      .rowLabel { flex:1; display:flex; flex-direction:column; font-size:11.5px; color:#c4cfe2; }
+      .rowLabel small { color:#7d8aa3; font-size:10.5px; margin-top:1px; }
+      .num { width:56px; }
+      .num, .pick { background:#2b3444; color:#e8edf6; border:1px solid #3d4658;
+        border-radius:5px; font-size:11.5px; padding:3px 6px; }
+      .row input[type=checkbox] { width:15px; height:15px; accent-color:#3f6ea8; cursor:pointer; }
       /* popped out: fill the whole window */
       .panel.popped { width:100%!important; height:100vh; border:0; border-radius:0;
         display:flex; flex-direction:column; box-shadow:none; }
@@ -398,25 +529,25 @@ function ensurePanel() {
 
   const tools = mk('div', { className: 'tools' });
     tools.appendChild(mk('button', { className: 'btn play', textContent: '▶ Play', title: 'Play every un-muted lane together', dataset: { act: 'play' } }));
-    tools.appendChild(mk('button', { className: 'btn', textContent: '⇱ Align', title: 'Shift every lane so their first sound lines up', dataset: { act: 'align' } }));
+    tools.appendChild(mk('button', { className: 'btn', textContent: '⇱ Align', title: 'Crop the silence at both ends of every clip and start them together. Click again to restore.', dataset: { act: 'align' } }));
     tools.appendChild(mk('button', { className: 'btn', textContent: '↔ Shift', title: 'Drag the waveform sideways to shift a lane. Hold Shift to toggle temporarily.', dataset: { act: 'move' } }));
     tools.appendChild(mk('span', { className: 'sep' }));
     tools.appendChild(mk('button', { className: 'btn', textContent: '⊕ Files', title: 'Open audio files from this computer', dataset: { act: 'files' } }));
     tools.appendChild(mk('span', { className: 'sep' }));
-    tools.appendChild(mk('button', { className: 'btn', textContent: '⇄ Sync', title: 'Share one time scale across all lanes', dataset: { act: 'sync' } }));
-    tools.appendChild(mk('button', { className: 'btn', textContent: 'Gain auto', title: 'Vertical zoom, identical for every lane', dataset: { act: 'gain' } }));
     tools.appendChild(mk('button', { className: 'btn', textContent: '＋', title: 'Taller lanes', dataset: { act: 'taller' } }));
     tools.appendChild(mk('button', { className: 'btn', textContent: '－', title: 'Shorter lanes', dataset: { act: 'shorter' } }));
     tools.appendChild(mk('span', { className: 'sep' }));
     tools.appendChild(mk('button', { className: 'btn', textContent: '⧉ Window', title: 'Open the panel in its own window — move it to a second monitor', dataset: { act: 'pop' } }));
     tools.appendChild(mk('button', { className: 'btn', textContent: 'Rescan', title: 'Scan the page again', dataset: { act: 'rescan' } }));
     tools.appendChild(mk('button', { className: 'btn', textContent: 'Clear', title: 'Remove all lanes', dataset: { act: 'clear' } }));
+    tools.appendChild(mk('button', { className: 'btn', textContent: '\u2699', title: 'Settings', dataset: { act: 'settings' } }));
   panel.appendChild(tools);
 
   const lanesEl  = mk('div', { className: 'lanes' });
   const statusBar = mk('div', { className: 'status' });
   const grip     = mk('div', { className: 'grip' });
   panel.appendChild(lanesEl);
+  buildSettings(panel);
   panel.appendChild(statusBar);
   panel.appendChild(grip);
   shadow.appendChild(panel);
@@ -434,28 +565,20 @@ function ensurePanel() {
     } else if (act === 'play')   { toggleAll(); }
     else if (act === 'align')    { alignOnsets(); }
     else if (act === 'move')     { moveMode = !moveMode; e.target.classList.toggle('on', moveMode); applyCursorMode(); }
-    else if (act === 'clear')    { stopAll(); [...lanes.keys()].forEach(dropLane); }
-    else if (act === 'rescan')   { scanDom(); }
+    else if (act === 'clear')    { stopAll(); parked.length = 0; [...lanes.keys()].forEach(dropLane); }
+    else if (act === 'rescan')   { rescan(); }
     else if (act === 'pop')      { popOut(); }
     else if (act === 'files')    { pickFiles(); }
     else if (act === 'taller' || act === 'shorter') {
       laneH = Math.max(56, Math.min(240, laneH + (act === 'taller' ? 26 : -26)));
       applySize();
-    } else if (act === 'sync') {
-      syncAxis = !syncAxis; e.target.classList.toggle('on', syncAxis); refreshAll();
-    } else if (act === 'gain') {
-      const seq = ['auto', 1, 2, 4, 8];
-      gainMode = seq[(seq.indexOf(gainMode) + 1) % seq.length];
-      e.target.textContent = 'Gain ' + (gainMode === 'auto' ? 'auto' : '\u00d7' + gainMode);
-      e.target.classList.toggle('on', gainMode !== 1);
-      refreshAll();
+    } else if (act === 'settings') {
+      toggleSettings();
     }
   };
   shadow.querySelector('.bar').addEventListener('click', onTool);
   shadow.querySelector('.tools').addEventListener('click', onTool);
 
-  shadow.querySelector('[data-act="sync"]').classList.toggle('on', syncAxis);
-  shadow.querySelector('[data-act="gain"]').classList.add('on');
   if (IS_PANEL) {
     panel.classList.add('popped');
     ['pop', 'rescan', 'fold'].forEach(a => {
@@ -484,6 +607,109 @@ function fitPanelWindow() {
   refreshAll();
 }
 
+/* ============================ settings ============================ */
+function loadSettings() {
+  try {
+    return api.storage.local.get('settings').then(({ settings }) => {
+      cfg = Object.assign({}, DEFAULTS, settings || {});
+      return cfg;
+    }).catch(() => cfg);
+  } catch (e) { return Promise.resolve(cfg); }
+}
+
+function saveSettings() {
+  try { api.storage.local.set({ settings: cfg }); } catch (e) {}
+}
+
+function buildSettings(panel) {
+  const mk = (tag, props) => {
+    const n = document.createElement(tag);
+    if (props) for (const k in props) {
+      if (k === 'dataset') { for (const d in props.dataset) n.dataset[d] = props.dataset[d]; }
+      else n[k] = props[k];
+    }
+    return n;
+  };
+  const sheet = mk('div', { className: 'sheet' });
+  sheet.hidden = true;
+
+  const head = mk('div', { className: 'sheetHead' });
+  head.appendChild(mk('span', { textContent: 'Settings' }));
+  const close = mk('button', { className: 'ico', textContent: '\u2715', title: 'Close' });
+  close.addEventListener('click', () => { sheet.hidden = true; });
+  head.appendChild(close);
+  sheet.appendChild(head);
+
+  const row = (label, control, hint) => {
+    const r = mk('div', { className: 'row' });
+    const l = mk('label', { className: 'rowLabel' });
+    l.appendChild(mk('span', { textContent: label }));
+    if (hint) l.appendChild(mk('small', { textContent: hint }));
+    r.appendChild(l);
+    r.appendChild(control);
+    sheet.appendChild(r);
+    return r;
+  };
+
+  const maxIn = mk('input', { type: 'number', className: 'num', min: '1', max: '8', step: '1' });
+  maxIn.value = String(cfg.maxLanes);
+  maxIn.addEventListener('change', () => {
+    cfg.maxLanes = Math.max(1, Math.min(8, parseInt(maxIn.value, 10) || DEFAULTS.maxLanes));
+    maxIn.value = String(cfg.maxLanes);
+    saveSettings();
+    flushParked();
+  });
+  row('Max lanes', maxIn, 'How many waveforms can be compared at once');
+
+  const fullSel = mk('select', { className: 'pick' });
+  [['keep', 'Keep what is shown'], ['replace', 'Replace the oldest']].forEach(([v, t]) => {
+    const o = mk('option', { value: v, textContent: t });
+    if (cfg.whenFull === v) o.selected = true;
+    fullSel.appendChild(o);
+  });
+  fullSel.addEventListener('change', () => { cfg.whenFull = fullSel.value; saveSettings(); });
+  row('When full', fullSel, 'New audio is never discarded silently');
+
+  const syncCb = mk('input', { type: 'checkbox' });
+  syncCb.checked = !!cfg.sync;
+  syncCb.addEventListener('change', () => { cfg.sync = syncCb.checked; saveSettings(); refreshAll(); });
+  row('Shared time scale', syncCb, 'Lanes line up vertically — keep this on to compare');
+
+  const gainSel = mk('select', { className: 'pick' });
+  [['auto', 'Auto'], ['1', '\u00d71'], ['2', '\u00d72'], ['4', '\u00d74'], ['8', '\u00d78']].forEach(([v, t]) => {
+    const o = mk('option', { value: v, textContent: t });
+    if (String(cfg.gain) === v) o.selected = true;
+    gainSel.appendChild(o);
+  });
+  gainSel.addEventListener('change', () => {
+    cfg.gain = gainSel.value === 'auto' ? 'auto' : Number(gainSel.value);
+    saveSettings(); refreshAll();
+  });
+  row('Vertical zoom', gainSel, 'Same factor for every lane, so loudness stays comparable');
+
+  const trimCb = mk('input', { type: 'checkbox' });
+  trimCb.checked = !!cfg.trimOnAlign;
+  trimCb.addEventListener('change', () => { cfg.trimOnAlign = trimCb.checked; saveSettings(); });
+  row('Align crops silence', trimCb, 'Align removes the dead air at both ends');
+
+  const thrSel = mk('select', { className: 'pick' });
+  [['0.04', 'Gentle'], ['0.08', 'Normal'], ['0.15', 'Aggressive']].forEach(([v, t]) => {
+    const o = mk('option', { value: v, textContent: t });
+    if (String(cfg.trimThresh) === v) o.selected = true;
+    thrSel.appendChild(o);
+  });
+  thrSel.addEventListener('change', () => { cfg.trimThresh = Number(thrSel.value); saveSettings(); });
+  row('Crop strength', thrSel, 'How loud counts as "not silence"');
+
+  panel.appendChild(sheet);
+  return sheet;
+}
+
+function toggleSettings() {
+  const sheet = shadow && shadow.querySelector('.sheet');
+  if (sheet) sheet.hidden = !sheet.hidden;
+}
+
 function applyCursorMode() {
   if (!shadow) return;
   shadow.querySelectorAll('.wrap').forEach(w => w.classList.toggle('move', moveMode));
@@ -499,6 +725,16 @@ function paintStatus() {
     b.textContent = String(value);
     statusEl.appendChild(b);
   };
+  if (parked.length > 0) {
+    const w = document.createElement('b');
+    w.textContent = String(parked.length);
+    statusEl.appendChild(document.createTextNode('\u23f3 '));
+    statusEl.appendChild(w);
+    statusEl.appendChild(document.createTextNode(
+      ' clip' + (parked.length > 1 ? 's' : '') + ' waiting \u2014 ' + lanes.size + '/' +
+      cfg.maxLanes + ' lanes in use. Close a lane, or raise Max lanes in Settings.'));
+    return;
+  }
   if (IS_PANEL) {
     put('lanes', lanes.size);
     put('source', 'this window');
@@ -537,14 +773,14 @@ function recomputeGain() {
       const v = Math.max(l.peaks.maxs[i], -l.peaks.mins[i]);
       if (v > peak) peak = v;
     }
-  gainVal = gainMode === 'auto'
+  gainVal = cfg.gain === 'auto'
     ? Math.max(1, Math.min(12, peak > 0.001 ? 0.94 / peak : 1))
-    : gainMode;
+    : Number(cfg.gain) || 1;
 }
 
 function refreshAll() {
   recomputeGain();
-  for (const l of lanes.values()) { redraw(l); paintCursor(l); paintOffset(l); }
+  for (const l of lanes.values()) { redraw(l); paintCursor(l); paintOffset(l); paintMeta(l); }
   updateCount();
   paintStatus();
   applyCursorMode();
@@ -560,6 +796,33 @@ function relayout() { if (IS_PANEL) fitPanelWindow(); }
  * descriptors. The window is independent of the tab, so it also survives
  * navigating away.
  */
+/* Bytes for a lane, for handing over to the panel window.
+   Preference order:
+     1. the original file, if we still hold it and it can be read here
+     2. a WAV re-encoded from the AudioBuffer we decoded ourselves — that memory
+        is always local, so it works even when (1) is blocked
+   Never throws; returns null when there is nothing to send. */
+const XFER_MAX = 12 * 1024 * 1024;
+
+function laneBytes(l) {
+  if (l.raw && l.raw.byteLength <= XFER_MAX) {
+    const b64 = bufToB64(l.raw);
+    if (b64) return { b64, mime: l.mime || '' };
+  }
+  if (l.buffer) {
+    try {
+      const a = l.trimA || 0;
+      const b = l.trimB == null ? l.duration : l.trimB;
+      const ab = encodeWavBuffer(l.buffer, a, b, true);   // mono keeps it small
+      if (ab.byteLength <= XFER_MAX) {
+        const b64 = bufToB64(ab);
+        if (b64) return { b64, mime: 'audio/wav' };
+      }
+    } catch (e) {}
+  }
+  return null;
+}
+
 function laneDescriptor(l) {
   const d = {
     url: l.url || '',
@@ -567,30 +830,67 @@ function laneDescriptor(l) {
     offset: l.offset || 0,
     muted: !!l.muted
   };
-  // Lanes with no URL (files opened from disk) have to travel as bytes.
-  if (!d.url && l.raw && l.raw.byteLength <= 8 * 1024 * 1024) {
-    d.b64 = bufToB64(l.raw);
-    d.mime = l.mime || '';
+  // A blob:/data: URL belongs to the page and cannot be fetched from an
+  // extension page, and a lane opened from disk has no URL at all. Both have to
+  // travel as bytes.
+  const refetchable = /^https?:/i.test(d.url);
+  if (!refetchable) {
+    const bytes = laneBytes(l);
+    if (bytes) { d.b64 = bytes.b64; d.mime = bytes.mime; }
+    else d.unavailable = true;
   }
   return d;
 }
 
+/* Rebuild each descriptor from primitives only. Anything that cannot be turned
+   into a plain value is dropped rather than allowed to break the message. */
+function plainDescriptors() {
+  const out = [];
+  for (const l of lanes.values()) {
+    if (!l.peaks) continue;
+    let d = null;
+    try { d = laneDescriptor(l); } catch (e) { d = null; }
+    if (!d) continue;
+    const p = {
+      url: String(d.url || ''),
+      label: String(d.label || 'audio'),
+      offset: Number(d.offset) || 0,
+      muted: !!d.muted
+    };
+    if (typeof d.b64 === 'string' && d.b64) { p.b64 = d.b64; p.mime = String(d.mime || ''); }
+    else if (!/^https?:/i.test(p.url)) p.unavailable = true;
+    out.push(p);
+  }
+  return out;
+}
+
 async function popOut() {
+  let lanesPayload = [];
+  try { lanesPayload = plainDescriptors(); } catch (e) { lanesPayload = []; }
   try {
-    const r = await api.runtime.sendMessage({
-      type: 'wf:openPanel',
-      lanes: [...lanes.values()].filter(l => l.peaks).map(laneDescriptor)
-    });
+    const r = await api.runtime.sendMessage({ type: 'wf:openPanel', lanes: lanesPayload });
+    // The window opening is what matters; a payload problem is reported softly.
     if (r && r.ok === false) note('Could not open the window: ' + (r.error || 'unknown'));
+    else if (r && r.partial) note('Window opened, but the audio could not be handed over.');
   } catch (e) {
-    note('Could not open the window: ' + ((e && e.message) || e));
+    // Ask for the window with no payload at all rather than giving up.
+    try {
+      const r2 = await api.runtime.sendMessage({ type: 'wf:openPanel', lanes: [] });
+      if (!r2 || r2.ok === false) note('Could not open the window: ' + ((e && e.message) || e));
+      else note('Window opened empty \u2014 use \u2295 Files there, or replay the audio.');
+    } catch (e2) {
+      note('Could not open the window: ' + ((e && e.message) || e));
+    }
   }
 }
 
 /* Keep an open panel window in step with what the tab discovers. */
 function broadcastLane(lane) {
   if (IS_PANEL || !lane.peaks) return;
-  try { api.runtime.sendMessage({ type: 'wf:panelLane', lane: laneDescriptor(lane) }); } catch (e) {}
+  try {
+    const d = plainDescriptors().find(x => x.label === lane.nameEl.textContent);
+    if (d) api.runtime.sendMessage({ type: 'wf:panelLane', lane: d });
+  } catch (e) {}
 }
 
 /* Show a short message on the status bar without touching innerHTML. */
@@ -634,6 +934,10 @@ async function addBytes(key, label, buf, mime) {
   let audio;
   try { audio = await actx().decodeAudioData(buf.slice(0)); }
   catch (e) { note('Cannot decode ' + label + ' — unsupported codec'); return; }
+  if (!audio || audio.duration < MIN_DUR) {
+    note(label + ' is too short to show (' + (audio ? audio.duration.toFixed(2) : '0') + 's)');
+    return;
+  }
   const peaks = computePeaks(audio);
   offer({
     key, url: '', label, peaks, duration: peaks.duration,
@@ -721,9 +1025,15 @@ function createLane(spec) {
     addEventListener('DOMContentLoaded', () => pending.splice(0).forEach(offer), { once: true });
     return;
   }
-  if (lanes.size >= MAX_LANES) {
-    const victim = [...lanes.entries()].find(([, l]) => !l.pinned);
-    if (victim) dropLane(victim[0]); else return;
+  if (lanes.size >= cfg.maxLanes) {
+    if (cfg.whenFull === 'replace') {
+      const victim = [...lanes.entries()].find(([, l]) => !l.pinned);
+      if (victim) dropLane(victim[0]);
+      else { park(spec); return; }
+    } else {
+      park(spec);   // never drop what the user is looking at
+      return;
+    }
   }
 
   const node = document.createElement('div');
@@ -758,9 +1068,11 @@ function createLane(spec) {
     regEl: node.querySelector('.region'),
     wrap: node.querySelector('.wrap'),
     peaks: spec.peaks || null,
+    sig: null,
     buffer: spec.buffer || null,
     duration: spec.duration || (spec.peaks && spec.peaks.duration) || 0,
     offset: spec.offset || 0, muted: !!spec.muted, pinned: false, raf: 0,
+    trimA: 0, trimB: null,
     raw: spec.raw || null, mime: spec.mime || '', selA: null, selB: null
   };
   lanes.set(lane.key, lane);
@@ -794,6 +1106,7 @@ function createLane(spec) {
   wireMouse(lane);
 
   if (lane.muted) setMute(lane, true);
+  if (lane.peaks && dedupe(lane)) return;
 
   // A URL lane still fetches the real file: full-resolution peaks plus a
   // buffer we can play. Lanes that arrived as bytes already have both.
@@ -814,6 +1127,23 @@ function setMute(lane, on) {
   if (T.playing) playAll(T.pos);      // apply immediately
 }
 
+function park(spec) {
+  if (!parked.some(p => p.key === spec.key)) {
+    parked.push(spec);
+    while (parked.length > PARK_MAX) parked.shift();
+  }
+  paintStatus();
+}
+
+/* Let waiting clips in as soon as there is room. */
+function flushParked() {
+  while (parked.length && lanes.size < cfg.maxLanes) {
+    const spec = parked.shift();
+    if (!lanes.has(spec.key)) createLane(spec);
+  }
+  paintStatus();
+}
+
 function dropLane(key) {
   const lane = lanes.get(key);
   if (!lane) return;
@@ -823,6 +1153,7 @@ function dropLane(key) {
   lanes.delete(key);
   refreshAll();
   relayout();
+  flushParked();
 }
 
 function wireMedia(lane) {
@@ -847,6 +1178,17 @@ function tickEl(lane) {
   if (lane.el && !lane.el.paused && !T.playing) lane.raf = winOf().requestAnimationFrame(() => tickEl(lane));
 }
 
+function paintMeta(lane) {
+  if (!lane.peaks) return;
+  const v = visDur(lane);
+  lane.metaEl.textContent = lane.trimB != null
+    ? fmtSec(v) + ' \u2702'          // scissors: this lane is cropped
+    : fmtSec(v);
+  lane.metaEl.title = lane.trimB != null
+    ? 'Cropped from ' + fmtSec(lane.duration) + ' \u2014 click Align again to restore'
+    : '';
+}
+
 function paintOffset(lane) {
   lane.offEl.textContent = Math.abs(lane.offset) < 0.001 ? ''
     : (lane.offset > 0 ? '+' : '') + lane.offset.toFixed(3) + 's';
@@ -855,11 +1197,13 @@ function paintOffset(lane) {
 function paintCursor(lane) {
   const { t0, span } = laneAxis(lane);
   const W = lane.wrap.clientWidth;
-  let t = null;
+  // While the page plays its own element, follow that; otherwise follow our
+  // transport, which sits at 0 after a rewind so the playhead parks at the start.
+  let t;
   if (T.playing) t = T.pos;
-  else if (lane.el && lane.el.currentTime > 0) t = lane.offset + lane.el.currentTime;
-  else if (T.pos > 0) t = T.pos;
-  if (t == null || !span) { lane.curEl.style.display = 'none'; return; }
+  else if (lane.el && !lane.el.paused && lane.el.currentTime > 0) t = lane.offset + lane.el.currentTime;
+  else t = T.pos || 0;
+  if (!span) { lane.curEl.style.display = 'none'; return; }
   const x = (t - t0) / span * W;
   if (x < -2 || x > W + 2) { lane.curEl.style.display = 'none'; return; }
   lane.curEl.style.display = 'block';
@@ -930,6 +1274,7 @@ async function loadPeaks(lane) {
     lane.peaks = cached.peaks; lane.buffer = cached.buffer; lane.duration = cached.peaks.duration;
     lane.raw = cached.raw || null; lane.mime = cached.mime || '';
     lane.metaEl.textContent = fmtSec(lane.duration);
+    if (dedupe(lane)) return;
     refreshAll(); return;
   }
 
@@ -946,11 +1291,30 @@ async function loadPeaks(lane) {
       else if (r && r.error) err = r.error;
     } catch (e) { err = String(e && e.message || e); }
   }
-  if (!buf) { if (!lane.peaks) fail(lane, err || 'Could not read the audio data'); return; }
+  if (!buf) {
+    rejected.add(url);                 // do not retry this source every playback
+    if (!lane.peaks) fail(lane, err || 'Could not read the audio data');
+    return;
+  }
 
   let audio;
   try { audio = await actx().decodeAudioData(buf.slice(0)); }
-  catch (e) { if (!lane.peaks) fail(lane, 'Decode failed — this browser cannot decode that codec'); return; }
+  catch (e) {
+    rejected.add(url);
+    if (!lane.peaks) {
+      note('Cannot decode ' + (lane.nameEl.textContent || 'audio') + ' \u2014 unsupported codec');
+      dropLane(lane.key);
+    }
+    return;
+  }
+
+  // Too short to be real content (silent primers decode to a few milliseconds).
+  // Remember the source so we do not keep fetching and decoding it.
+  if (!audio || audio.duration < MIN_DUR) {
+    rejected.add(url);
+    dropLane(lane.key);
+    return;
+  }
 
   if (buf.byteLength <= 25 * 1024 * 1024) { lane.raw = buf; lane.mime = guessMime(url); }
   const peaks = computePeaks(audio);
@@ -958,6 +1322,7 @@ async function loadPeaks(lane) {
   if (peakCache.size > 12) peakCache.delete(peakCache.keys().next().value);
   lane.peaks = peaks; lane.buffer = audio; lane.duration = peaks.duration;
   lane.metaEl.textContent = fmtSec(peaks.duration);
+  if (dedupe(lane)) return;
   refreshAll();
   broadcastLane(lane);
 }
@@ -970,6 +1335,54 @@ function fail(lane, msg) {
     p.className = 'msg'; p.textContent = '⚠ ' + msg;
     lane.node.appendChild(p);
   }
+}
+
+/* Sites often mint a fresh blob: URL every time they play the same clip, so the
+   URL is not a usable identity. Fingerprint the decoded audio instead.
+
+   The two detection routes hand us peaks at different resolutions (the page-world
+   hook sends 2048 buckets, our own decode computes 8192), so the fingerprint has
+   to be resolution-independent: duration plus a coarse 32-bucket loudness shape,
+   each bucket quantised to four levels relative to the clip's own peak. Verified
+   to match across 512 / 2048 / 8192 buckets for the same audio. */
+function sigOf(peaks) {
+  const B = 32;
+  const a = peaks.maxs, b = peaks.mins, n = a.length;
+  let peak = 0;
+  for (let i = 0; i < n; i++) peak = Math.max(peak, a[i], -b[i]);
+  if (peak < 1e-6) peak = 1;
+  let h = 2166136261;
+  for (let k = 0; k < B; k++) {
+    const s0 = Math.floor(k * n / B);
+    const e0 = Math.max(s0 + 1, Math.floor((k + 1) * n / B));
+    let m = 0;
+    for (let i = s0; i < e0 && i < n; i++) m = Math.max(m, a[i], -b[i]);
+    const r = m / peak;
+    h ^= (r < 0.08 ? 0 : r < 0.35 ? 1 : r < 0.7 ? 2 : 3);
+    h = Math.imul(h, 16777619);
+  }
+  return (peaks.duration || 0).toFixed(2) + ':' + (h >>> 0).toString(36);
+}
+
+/* Returns true when this lane duplicates one we already have (and removes it). */
+function dedupe(lane) {
+  if (!lane.peaks) return false;
+  lane.sig = sigOf(lane.peaks);
+  for (const other of lanes.values()) {
+    if (other === lane || !other.sig || other.sig !== lane.sig) continue;
+    // Keep whichever arrived first, but carry over anything it is missing.
+    if (!other.buffer && lane.buffer) other.buffer = lane.buffer;
+    if (!other.raw && lane.raw) { other.raw = lane.raw; other.mime = lane.mime; }
+    if ((!other.peaks || other.peaks.mins.length < lane.peaks.mins.length)) {
+      other.peaks = lane.peaks;
+      other.duration = lane.duration;
+      other.metaEl.textContent = fmtSec(lane.duration);
+      redraw(other);
+    }
+    dropLane(lane.key);
+    return true;
+  }
+  return false;
 }
 
 function computePeaks(audio) {
@@ -1011,9 +1424,15 @@ function safeName(s) {
 }
 
 /* 16-bit PCM WAV encoder — used for selections and for buffers we have no original file for */
-function encodeWav(buffer, startSec, endSec) {
+function encodeWav(buffer, startSec, endSec, mono) {
+  return new Blob([encodeWavBuffer(buffer, startSec, endSec, mono)], { type: 'audio/wav' });
+}
+
+/* Always allocates its own ArrayBuffer, so the result is safe to base64 and
+   pass across contexts on any engine. */
+function encodeWavBuffer(buffer, startSec, endSec, mono) {
   const sr = buffer.sampleRate;
-  const ch = Math.min(2, buffer.numberOfChannels);
+  const ch = mono ? 1 : Math.min(2, buffer.numberOfChannels);
   const s0 = Math.max(0, Math.floor((startSec || 0) * sr));
   const s1 = Math.min(buffer.length, Math.ceil((endSec == null ? buffer.duration : endSec) * sr));
   const n = Math.max(0, s1 - s0);
@@ -1037,7 +1456,7 @@ function encodeWav(buffer, startSec, endSec) {
       o += 2;
     }
   }
-  return new Blob([ab], { type: 'audio/wav' });
+  return ab;
 }
 
 function saveBlob(blob, filename) {
@@ -1063,12 +1482,22 @@ function download(lane) {
   const base = safeName((lane.nameEl.textContent || 'audio').replace(/\.[a-z0-9]{2,5}$/i, ''));
   const hasSel = lane.selA != null && lane.selB != null && (lane.selB - lane.selA) > 0.01;
 
+  const t0 = lane.trimA || 0;
+
   if (hasSel) {
     if (!lane.buffer) { flash(lane, 'no audio data'); return; }
-    const a = Math.max(0, lane.selA), b = Math.min(lane.duration, lane.selB);
+    // Selection times are in the visible timeline; shift them back into the file.
+    const a = Math.max(0, t0 + lane.selA);
+    const b = Math.min(lane.duration, t0 + lane.selB);
     saveBlob(encodeWav(lane.buffer, a, b),
              `${base}_${a.toFixed(2)}-${b.toFixed(2)}s.wav`);
     flash(lane, 'saved ' + (b - a).toFixed(2) + 's');
+    return;
+  }
+  // Cropped lane, no selection: save exactly what is on screen.
+  if (lane.trimB != null && lane.buffer) {
+    saveBlob(encodeWav(lane.buffer, t0, lane.trimB), `${base}_trimmed.wav`);
+    flash(lane, 'saved ' + visDur(lane).toFixed(2) + 's');
     return;
   }
   if (lane.raw) {
@@ -1092,27 +1521,36 @@ function redraw(lane) {
   const cssW = cv.clientWidth || panelW - 18;
   const cssH = laneH;
   const dpr = winOf().devicePixelRatio || 1;
-  cv.width = Math.round(cssW * dpr); cv.height = Math.round(cssH * dpr);
+  cv.width = Math.round(cssW * dpr);
+  cv.height = Math.round(cssH * dpr);
   const g = cv.getContext('2d');
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   const RULER = 14, waveH = cssH - RULER, mid = waveH / 2;
   const { t0, span } = laneAxis(lane);
-  const startT = syncAxis ? lane.offset : 0;
+  const shown = visDur(lane);
+  const startT = cfg.sync ? lane.offset : 0;
   const xa = Math.round((startT - t0) / span * cssW);
-  const xb = Math.round((startT + lane.duration - t0) / span * cssW);
+  const xb = Math.round((startT + shown - t0) / span * cssW);
   const L = Math.max(0, xa), R = Math.min(cssW, xb);
 
   g.fillStyle = COLOR.dead; g.fillRect(0, 0, cssW, waveH);
   g.fillStyle = lane.muted ? COLOR.fieldMute : COLOR.field;
   g.fillRect(L, 0, Math.max(0, R - L), waveH);
 
+  // Peaks cover the whole clip; only the kept region is drawn.
   const { mins, maxs } = lane.peaks, N = mins.length;
+  const full = lane.duration || shown;
+  const iA = lane.trimB == null ? 0 : Math.floor((lane.trimA / full) * N);
+  const iB = lane.trimB == null ? N : Math.min(N, Math.ceil((lane.trimB / full) * N));
+  const iN = Math.max(1, iB - iA);
   const W = Math.max(1, xb - xa);
+
   g.fillStyle = lane.muted ? COLOR.waveMute : COLOR.wave;
   for (let x = L; x < R; x++) {
     const u = x - xa;
-    const a = Math.floor(u * N / W), b = Math.max(a + 1, Math.floor((u + 1) * N / W));
+    const a = iA + Math.floor(u * iN / W);
+    const b = Math.max(a + 1, iA + Math.floor((u + 1) * iN / W));
     let mn = 0, mx = 0;
     for (let i = a; i < b && i < N; i++) {
       if (mins[i] < mn) mn = mins[i];
@@ -1159,6 +1597,13 @@ addEventListener('keydown', onHotkey);
 
 /* ============================ on/off ============================ */
 api.runtime.onMessage.addListener((msg) => {
+  if (msg && msg.type === 'wf:collectLanes' && !IS_PANEL) {
+    return Promise.resolve({
+      lanes: plainDescriptors()
+    });
+  }
+  if (msg && msg.type === 'wf:panelOpen')   { setPanelVisible(false); return; }
+  if (msg && msg.type === 'wf:panelClosed') { setPanelVisible(true);  return; }
   if (msg && msg.type === 'wf:enabled') {
     enabled = msg.enabled;
     if (!enabled) {
@@ -1169,15 +1614,14 @@ api.runtime.onMessage.addListener((msg) => {
   }
 });
 
-if (IS_PANEL) {
-  bootPanelWindow();
-} else {
+loadSettings().then(() => {
+  if (IS_PANEL) { bootPanelWindow(); return; }
   try {
     api.runtime.sendMessage({ type: 'wf:getEnabled' })
       .then((r) => { enabled = !r || r.enabled !== false; if (enabled) boot(); })
       .catch(() => boot());
   } catch (e) { boot(); }
-}
+});
 
 function boot() { scanDom(); [400, 1200, 3000].forEach(t => setTimeout(scanDom, t)); }
 
@@ -1195,22 +1639,33 @@ async function bootPanelWindow() {
 
 async function adoptDescriptor(d) {
   if (!d) return;
-  if (d.url) {
-    offer({ key: 'src:' + d.url, url: d.url, label: d.label || nameFromUrl(d.url),
-            offset: d.offset || 0, muted: !!d.muted });
-  } else if (d.b64) {
+  if (d.b64) {
     const buf = b64ToBuf(d.b64);
-    const key = 'file:' + (d.label || 'audio') + ':' + buf.byteLength;
+    const key = 'bytes:' + (d.label || 'audio') + ':' + buf.byteLength;
     if (lanes.has(key)) return;
     await addBytes(key, d.label || 'audio', buf, d.mime || '');
     const l = lanes.get(key);
     if (l) { l.offset = d.offset || 0; if (d.muted) setMute(l, true); refreshAll(); }
+    return;
+  }
+  if (d.unavailable) return;   // page-only blob we could not capture bytes for
+  if (d.url) {
+    offer({ key: 'src:' + d.url, url: d.url, label: d.label || nameFromUrl(d.url),
+            offset: d.offset || 0, muted: !!d.muted });
   }
 }
 
 api.runtime.onMessage.addListener((msg) => {
   if (IS_PANEL && msg && msg.type === 'wf:panelLaneFwd') adoptDescriptor(msg.lane);
 });
+
+/* Only one panel should ever be visible: when the standalone window is up, the
+   in-page panel steps aside, and comes back when that window closes. */
+function setPanelVisible(on) {
+  if (IS_PANEL || !host) return;
+  if (!on) stopAll();
+  host.style.setProperty('display', on ? 'block' : 'none', 'important');
+}
 
 addEventListener('resize', () => refreshAll());
 })();

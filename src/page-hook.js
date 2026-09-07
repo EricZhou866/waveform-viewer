@@ -23,8 +23,14 @@
 
   var PEAK_N = 2048;
   var seq = 0;
-  var seenUrls = [];
   var lastUrl = '';
+  /* url -> last time it was announced. This is a storm guard, NOT a permanent
+     de-duplication: a site that replays the same file must be able to announce
+     it again, otherwise closing a lane would make that clip unreachable until
+     the page is reloaded. The panel itself decides whether a lane already
+     exists. */
+  var announced = Object.create(null);
+  var REANNOUNCE_MS = 900;
 
   function post(msg) {
     try { msg.__wf = 1; window.postMessage(msg, '*'); } catch (e) {}
@@ -41,10 +47,19 @@
   }
 
   function pushUrl(u) {
-    if (!u || seenUrls.indexOf(u) !== -1) return;
-    seenUrls.push(u);
-    if (seenUrls.length > 48) seenUrls.shift();
+    if (!u) return;
+    var now = Date.now();
     lastUrl = u;
+    if (now - (announced[u] || 0) < REANNOUNCE_MS) return;
+    announced[u] = now;
+
+    // Keep the table from growing without bound on long sessions.
+    var keys = Object.keys(announced);
+    if (keys.length > 200) {
+      for (var i = 0; i < keys.length; i++) {
+        if (now - announced[keys[i]] > 60000) delete announced[keys[i]];
+      }
+    }
     post({ kind: 'url', url: u });
   }
 
@@ -199,6 +214,22 @@
     });
     po.observe({ type: 'resource', buffered: true });
   } catch (e) {}
+
+  /* The panel can ask for everything we know to be announced again — the manual
+     recovery path when a site replays audio without touching the network. */
+  window.addEventListener('message', function (e) {
+    if (e.source !== window) return;
+    var d = e.data;
+    if (!d || d.__wfCmd !== 'rescan') return;
+    try {
+      var keys = Object.keys(announced);
+      keys.sort(function (a, b) { return announced[b] - announced[a]; });
+      for (var i = 0; i < keys.length && i < 8; i++) {
+        announced[keys[i]] = 0;          // clear the throttle
+        post({ kind: 'url', url: keys[i] });
+      }
+    } catch (err) {}
+  });
 
   post({ kind: 'ready' });
 })();

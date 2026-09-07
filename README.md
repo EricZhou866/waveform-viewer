@@ -16,7 +16,8 @@ all of that in the page, in a panel you can pop onto a second monitor.
 
 - **Waveform per clip**, stacked as lanes in a floating panel
 - **One shared time scale** so lanes line up vertically and pacing differences show
-- **Align onsets** in one click, or drag a lane sideways with millisecond readout
+- **Align** crops the dead air off both ends and starts every clip together, in one
+  click — or drag a lane sideways by hand with a millisecond readout
 - **Synced playback** of every lane through a single playhead; mute or solo lanes
 - **Drag to measure** any interval to three decimal places
 - **Download** the selected region as WAV, or the original file untouched
@@ -50,15 +51,15 @@ The panel appears in the bottom-right as soon as audio is detected.
 
 | Button | What it does |
 |---|---|
-| `▶ Play` | Play every un-muted lane together on one playhead. `Ctrl/⌘ + Space` |
-| `⇱ Align` | Shift every lane so their first audible moment lines up |
-| `↔ Shift` | Drag a lane sideways to align by hand (hold **Shift** to toggle temporarily) |
-| `⇄ Sync` | One time scale for all lanes — keep this on when comparing |
-| `Gain auto` | Vertical zoom, identical across lanes so loudness stays comparable |
+| `▶ Play` | Play every un-muted lane together on one playhead. Stops and rewinds to the start when the longest lane finishes. `Ctrl/⌘ + Space` |
+| `⇱ Align` | **Crop the silence off both ends of every clip** and start them together. Click again to restore the full clips |
+| `↔ Shift` | Drag a lane sideways to align by hand (hold **Shift** to toggle temporarily). The ruler stays put; the waveform slides |
 | `＋` / `－` | Lane height |
+| `⚙` | Settings |
 | `⊕ Files` | Open audio files from your computer (or just drag them onto the panel) |
-| `⧉ Window` | Open the panel as its own browser window — drag it to a second monitor |
-| `Rescan` / `Clear` | Scan the page again / remove all lanes |
+| `⧉ Window` | Open the panel as its own browser window — drag it to a second monitor. The in-page panel steps aside while it is open |
+| `Rescan` | Scan the page again and ask it to re-announce the audio it has already loaded — use this if you closed a lane and the site replays without a fresh request |
+| `Clear` | Remove all lanes |
 
 ### Per lane
 
@@ -70,6 +71,19 @@ The panel appears in the bottom-right as soon as audio is detected.
 | `◉` | Solo — mute every other lane |
 | `🔊 / 🔇` | Mute this lane |
 | `✕` | Remove this lane |
+
+### Settings (`⚙`)
+
+| Setting | Default | What it does |
+|---|---|---|
+| Max lanes | 4 | How many waveforms fit on screen (1–8) |
+| When full | Keep what is shown | New audio is **parked, never discarded** — it slots in as soon as you close a lane or raise the limit. Switch to "Replace the oldest" for the old behaviour |
+| Shared time scale | on | Lanes use one ruler so they line up vertically |
+| Vertical zoom | Auto | Same factor for every lane, so loudness stays comparable |
+| Align crops silence | on | Turn off to make Align line up onsets by offset instead |
+| Crop strength | Normal | How loud counts as "not silence" (Gentle / Normal / Aggressive). Cropping works on a smoothed envelope and needs the sound to hold for a moment, so a stray click in the tail does not keep two seconds of near-silence alive |
+
+Settings persist across sessions.
 
 ### On the waveform
 
@@ -87,20 +101,31 @@ and maximise it — the waveforms fill the screen and the lane height splits the
 available space.
 
 The window is a normal extension window, not a popup owned by the tab, so it
-survives navigating away and can be left open across practice sessions. Lanes the
-tab finds afterwards are pushed to it automatically, and you can open more files
-directly in the window with `⊕ Files` or by dropping them in.
+survives navigating away and can be left open across practice sessions. Only one
+panel is ever visible: the in-page panel hides while the window is open and comes
+back when you close it. Lanes the tab finds afterwards are pushed across
+automatically, and you can open more files directly in the window with `⊕ Files`
+or by dropping them in.
+
+Audio the page holds as a `blob:` URL cannot be fetched from an extension page, so
+those clips travel to the window as bytes instead — you get the waveform either way.
+If the original file bytes cannot be read (Firefox blocks reading a buffer that
+came from another context), the audio is re-encoded from what was already decoded,
+so the hand-over still works. The window opens first and the audio follows, so a
+problem with one clip never leaves you without a window.
 
 ## Comparing two recordings
 
 1. Play the reference clip — lane 1 appears. Pin it with `☆`.
    (Or use `⊕ Files` / drag-and-drop if you already have the file on disk.)
 2. Play your own recording — lane 2 appears.
-3. Make sure `⇄ Sync` is on.
-4. Hit `⇱ Align`. Both onsets now start together.
-5. `▶ Play` to hear them layered; `🔇` one lane to hear just the other.
-6. Drag across any pause to read its exact length.
-7. `⬇` to save a region as WAV.
+3. Hit `⇱ Align`. The silence at both ends is cropped and both clips start
+   together, so the speech itself is what you are comparing. A `✂` next to the
+   duration marks a cropped lane; the download button then saves exactly what is
+   on screen.
+4. `▶ Play` to hear them layered; `🔇` one lane to hear just the other.
+5. Drag across any pause to read its exact length.
+6. `⬇` to save a region as WAV.
 
 ## Troubleshooting
 
@@ -116,6 +141,13 @@ media elements 2 · decoded 1 · audio requests 3 · page hook active
   `<audio>`/`<video>` elements can be found; Web Audio players will be missed.
 - **All counters zero** — play some audio first. Still zero means the page uses a
   path this extension does not cover.
+- **A lane you closed does not come back on replay** — hit `Rescan`. Some players
+  replay from memory without touching the network, so there is nothing for the
+  detector to see.
+- Clips shorter than 0.15 s are ignored. Many players fire a silent `data:`
+  primer before every playback to unlock the audio context; those would otherwise
+  pile up as empty 0.00 s lanes. A source that turns out not to be usable audio is
+  remembered and not fetched again.
 - **A lane shows ⚠** — the audio bytes could not be read; the message says why.
   Media Source Extensions (adaptive streams) and DRM-protected audio cannot be read.
 
@@ -123,7 +155,10 @@ media elements 2 · decoded 1 · audio requests 3 · page hook active
 
 - MSE / DRM-protected streams cannot be decoded
 - Files over 60 MB are skipped
-- Max 4 lanes at once (oldest un-pinned lane is evicted)
+- 4 lanes at once by default, up to 8 (Settings ▸ Max lanes)
+- Repeats of the same clip are merged automatically: many sites mint a new
+  `blob:` URL on every play, so lanes are de-duplicated by an audio fingerprint
+  rather than by URL
 - Firefox 140+ / Chrome 109+
 
 ## Layout
