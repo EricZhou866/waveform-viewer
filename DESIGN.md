@@ -818,7 +818,7 @@ if (/INPUT|TEXTAREA|SELECT/.test(tag) || e.target.isContentEditable) return;
 
 设置改动立即 `saveSettings()` 写 storage，不需要"保存"按钮。
 
-设置面板底部有一行版本号和仓库链接（`v1.2.0 · github.com/EricZhou866/waveform-viewer`），版本号同时显示在标题栏。用户报问题时第一句永远是"我这版是多少"，这一行省掉一轮来回；版本号取 `api.runtime.getManifest().version`，不写死。
+设置面板底部有一行版本号和仓库链接（`Waveform Viewer v<版本> · github.com/EricZhou866/waveform-viewer`），版本号同时显示在标题栏。用户报问题时第一句永远是"我这版是多少"，这一行省掉一轮来回；版本号取 `api.runtime.getManifest().version`，不写死。
 
 ### 12.6 样式隔离
 
