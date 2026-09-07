@@ -15,20 +15,21 @@ const api = (typeof browser !== 'undefined') ? browser : chrome;
 const IS_PANEL = /-extension:$/.test(location.protocol);
 
 /* User-visible settings, persisted in extension storage. */
-const SETTINGS_V = 2;   // bumped when a default changes in a way that must migrate
+const SETTINGS_V = 3;   // bumped when a default changes in a way that must migrate
 const DEFAULTS = {
   v: SETTINGS_V,
   maxLanes: 0,          // 0 = no cap: every clip gets a lane, and the list scrolls
+  autoAlign: true,      // new audio arrives cropped and aligned
   whenFull: 'keep',     // 'keep' = never discard silently | 'replace' = evict oldest
   sync: true,           // one shared time scale across lanes
   gain: 'auto',         // 'auto' | 1 | 2 | 4 | 8
   trimOnAlign: true,    // Align also crops leading/trailing silence
   trimThresh: 0.08,     // silence threshold, fraction of the clip's own peak
-  minDur: 1             // clips shorter than this many seconds are ignored
+  minDur: 2             // clips shorter than this many seconds are ignored
 };
 let cfg = Object.assign({}, DEFAULTS);
 const PEAK_RES  = 8192;
-const MIN_DUR_LO = 0.5, MIN_DUR_HI = 3;
+const MIN_DUR_LO = 0.5, MIN_DUR_HI = 10;
 /* Shortest clip worth a lane. User-settable because the right cut-off depends on
    the site: players fire silent primers of a few ms, but ad stingers and UI blips
    can run most of a second and are just as unwanted. */
@@ -49,6 +50,10 @@ let host = null, shadow = null, lanesBox = null, statusEl = null;
 let audioCtx = null;
 let laneH = 96, panelW = 640;
 let panelH = 0;          // height of the scrolling lane area, in-page mode
+/* Until the user drags a vertical edge the panel hugs its content and panelH is
+   only a ceiling. After that it is the height they asked for, empty space and
+   all — a panel that silently shrinks back is not a panel you can size. */
+let panelHSet = false;
 let gainVal = 1;
 /* Audio found while the panel was full. Nothing is thrown away: it waits here
    and slots in as soon as a lane frees up or the limit is raised. */
@@ -69,6 +74,10 @@ const laneCap = () => {
    context. Remembered so they are not fetched and decoded over and over. */
 const rejected = new Set();
 let moveMode = false;
+/* Whether the panel is in the aligned state. Explicit rather than derived from
+   "does any lane have a trim", because a lane arriving later has to know which
+   state to join. Seeded from cfg.autoAlign, flipped by the Align button. */
+let aligned = true;
 /* The window the panel currently lives in: this page when docked, the popup when
    popped out. Drag handlers, rAF, DPI and sizing must all go through it, otherwise
    everything breaks once the panel is moved to another monitor. */
@@ -395,13 +404,28 @@ function soundBounds(lane) {
   return { a: A, b: B };
 }
 
-function isTrimmed() {
-  for (const l of lanes.values()) if (l.trimB != null) return true;
-  return false;
+function alignOnsets() {
+  aligned = !aligned;
+  applyAlign();
 }
 
-function alignOnsets() {
-  const on = !isTrimmed();
+/* Bring one freshly-decoded lane into whatever state the panel is already in, so
+   audio that shows up later needs no second click. Trimming is per-lane, so only
+   the new lane is touched — a lane the user has shifted by hand stays put. The
+   offset fallback has no such luxury: lining up onsets is a comparison across
+   every lane, so that path re-runs the whole thing. */
+function joinAlign(lane) {
+  if (!aligned || !lane || !lane.peaks) return;
+  if (!cfg.trimOnAlign) { applyAlign(); return; }
+  const b = soundBounds(lane);
+  if (b) { lane.trimA = b.a; lane.trimB = b.b; } else { lane.trimA = 0; lane.trimB = null; }
+  lane.offset = 0;
+  paintMeta(lane);
+  refreshAll();
+}
+
+function applyAlign() {
+  const on = aligned;
   for (const l of lanes.values()) {
     l.offset = 0;
     l.selA = l.selB = null;
@@ -425,9 +449,13 @@ function alignOnsets() {
     }
   }
   T.pos = 0;
-  const btn = shadow && shadow.querySelector('[data-act="align"]');
-  if (btn) btn.classList.toggle('on', isTrimmed());
+  paintAlignBtn();
   refreshAll();
+}
+
+function paintAlignBtn() {
+  const btn = shadow && shadow.querySelector('[data-act="align"]');
+  if (btn) btn.classList.toggle('on', aligned);
 }
 
 /* ============================ panel ============================ */
@@ -453,7 +481,7 @@ function ensurePanel() {
   const PANEL_CSS = `
       * { box-sizing:border-box; margin:0; padding:0;
           font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif; }
-      .panel { width:${panelW}px; background:#1b1f28; color:#e8edf6;
+      .panel { position:relative; width:${panelW}px; background:#1b1f28; color:#e8edf6;
         border:1px solid #39404e; border-radius:10px;
         box-shadow:0 10px 34px rgba(0,0,0,.45); overflow:hidden; user-select:none; }
       .bar { display:flex; align-items:center; gap:8px; padding:7px 10px;
@@ -506,7 +534,20 @@ function ensurePanel() {
         border-top:1px solid #2c3341; }
       .status b { color:#a9b7d0; font-weight:600; }
       .empty { padding:18px 14px; text-align:center; font-size:12px; color:#7d8aa3; line-height:1.7; }
-      .grip { height:12px; background:#232936; cursor:nwse-resize; display:flex;
+      /* Resize from any edge or corner, each with the cursor that matches the
+         direction it actually moves in — a diagonal arrow on an edge that only
+         moves vertically is a lie about what the drag will do. */
+      .rs { position:absolute; z-index:5; }
+      .rs-n  { top:0; left:10px; right:10px; height:5px; cursor:ns-resize; }
+      .rs-s  { bottom:0; left:10px; right:10px; height:5px; cursor:ns-resize; }
+      .rs-e  { right:0; top:10px; bottom:10px; width:5px; cursor:ew-resize; }
+      .rs-w  { left:0; top:10px; bottom:10px; width:5px; cursor:ew-resize; }
+      .rs-nw { top:0; left:0; width:12px; height:12px; cursor:nwse-resize; }
+      .rs-se { bottom:0; right:0; width:12px; height:12px; cursor:nwse-resize; }
+      .rs-ne { top:0; right:0; width:12px; height:12px; cursor:nesw-resize; }
+      .rs-sw { bottom:0; left:0; width:12px; height:12px; cursor:nesw-resize; }
+      .collapsed .rs, .panel.popped .rs { display:none; }
+      .grip { height:12px; background:#232936; cursor:ns-resize; display:flex;
         align-items:center; justify-content:center; border-top:1px solid #39404e; }
       .grip::after { content:''; width:34px; height:3px; border-radius:2px; background:#4a556b; }
       .collapsed .lanes, .collapsed .grip, .collapsed .status, .collapsed .tools,
@@ -585,6 +626,8 @@ function ensurePanel() {
   buildSettings(panel);
   panel.appendChild(statusBar);
   panel.appendChild(grip);
+  ['n', 's', 'e', 'w', 'nw', 'ne', 'sw', 'se'].forEach(d =>
+    panel.appendChild(mk('div', { className: 'rs rs-' + d, dataset: { rs: d } })));
   shadow.appendChild(panel);
 
   lanesBox = shadow.querySelector('.lanes');
@@ -627,10 +670,12 @@ function ensurePanel() {
     const dockBtn = shadow.querySelector('[data-act="dock"]');
     if (dockBtn) dockBtn.remove();          // only the standalone window can dock
     makeDraggable(shadow.querySelector('.bar'));
-    makeResizable(shadow.querySelector('.grip'));
+    shadow.querySelectorAll('.rs').forEach(h => makeResizable(h, h.dataset.rs));
+    makeResizable(shadow.querySelector('.grip'), 's');
     restoreGeometry();
     wireDropZone();
   }
+  paintAlignBtn();
   paintStatus();
 }
 
@@ -655,11 +700,16 @@ function loadSettings() {
       // v1 capped at 4 by default, which parked everything past the fourth clip
       // where nobody could see it. Anyone still sitting on that exact number was
       // never choosing it, so lift it; a deliberate 1-3 or 5-8 is left alone.
-      if (settings && settings.v !== SETTINGS_V) {
-        if (Number(settings.maxLanes) === 4) cfg.maxLanes = 0;
+      if (settings && Number(settings.v) !== SETTINGS_V) {
+        const from = Number(settings.v) || 1;
+        // Only ever migrate a value that is exactly the old default: that is the
+        // one nobody chose. A deliberate setting is left alone.
+        if (from < 2 && Number(settings.maxLanes) === 4) cfg.maxLanes = 0;
+        if (from < 3 && Number(settings.minDur) === 1) cfg.minDur = DEFAULTS.minDur;
         cfg.v = SETTINGS_V;
         saveSettings();
       }
+      aligned = !!cfg.autoAlign;
       return cfg;
     }).catch(() => cfg);
   } catch (e) { return Promise.resolve(cfg); }
@@ -731,6 +781,16 @@ function buildSettings(panel) {
   });
   row('Ignore clips shorter than', minIn,
       'Seconds, ' + MIN_DUR_LO + '\u2013' + MIN_DUR_HI + '. Keeps jingles and the silent primers players fire out of the way');
+
+  const autoCb = mk('input', { type: 'checkbox' });
+  autoCb.checked = !!cfg.autoAlign;
+  autoCb.addEventListener('change', () => {
+    cfg.autoAlign = autoCb.checked;
+    saveSettings();
+    aligned = cfg.autoAlign;
+    applyAlign();
+  });
+  row('Align on arrival', autoCb, 'New audio comes in cropped and starting at zero, with no click');
 
   const syncCb = mk('input', { type: 'checkbox' });
   syncCb.checked = !!cfg.sync;
@@ -847,7 +907,10 @@ function applySize() {
   if (!shadow) return;
   if (!IS_PANEL) {
     shadow.querySelector('.panel').style.width = panelW + 'px';
-    if (lanesBox) lanesBox.style.maxHeight = panelH + 'px';
+    if (lanesBox) {
+      lanesBox.style.maxHeight = panelH + 'px';
+      lanesBox.style.height = panelHSet ? panelH + 'px' : '';
+    }
   }
   shadow.querySelectorAll('canvas').forEach(c => { c.style.height = laneH + 'px'; });
   refreshAll();
@@ -1070,9 +1133,7 @@ function wireDropZone() {
 function makeDraggable(handle) {
   handle.addEventListener('mousedown', (e) => {
     if (e.target.dataset && e.target.dataset.act) return;
-    const r = host.getBoundingClientRect();
-    ['left', 'top'].forEach((k, i) => host.style.setProperty(k, (i ? r.top : r.left) + 'px', 'important'));
-    ['right', 'bottom'].forEach(k => host.style.setProperty(k, 'auto', 'important'));
+    const r = pinHost();
     const sx = e.clientX, sy = e.clientY, sl = r.left, st = r.top;
     const mv = (ev) => {
       host.style.setProperty('left', Math.max(0, Math.min(winOf().innerWidth - 80, sl + ev.clientX - sx)) + 'px', 'important');
@@ -1084,29 +1145,75 @@ function makeDraggable(handle) {
   });
 }
 
-/* The grip sizes the panel itself. Lane height has its own control (＋/－), so
-   dragging the corner changes how much of the stack is on screen at once — past
-   that the lane area scrolls. */
-function makeResizable(grip) {
-  grip.addEventListener('mousedown', (e) => {
+/* Resizing sizes the panel, not the waveforms: lane height has its own control
+   (＋/－), so a drag changes how much of the stack is on screen at once, and past
+   that the lane area scrolls.
+   `dir` is any combination of n/s/e/w. Dragging the north or west side has to move
+   the panel as well as resize it, so the opposite edge stays where it is —
+   otherwise the panel slides out from under the cursor. */
+const CURSOR = { n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize',
+                 nw: 'nwse-resize', se: 'nwse-resize', ne: 'nesw-resize', sw: 'nesw-resize' };
+const clampN = (lo, hi, v) => Math.max(lo, Math.min(hi, v));
+
+function makeResizable(el, dir) {
+  if (!el) return;
+  el.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    const r = pinHost();
     const sx = e.clientX, sy = e.clientY, sw = panelW, sh = panelH;
+    const panelEl = shadow.querySelector('.panel');
+    const doc = winOf().document;
+    const prevCursor = doc.body.style.cursor;
+    // Hold the cursor for the whole drag: once the pointer leaves the 5px strip
+    // it would otherwise flip back to whatever it is over.
+    doc.body.style.cursor = CURSOR[dir] || 'default';
+
     const mv = (ev) => {
       const vh = winOf().innerHeight || 900;
-      panelW = Math.max(340, Math.min(1500, sw + (ev.clientX - sx)));
-      panelH = Math.max(120, Math.min(Math.max(160, vh - 140), sh + (ev.clientY - sy)));
+      const dx = ev.clientX - sx, dy = ev.clientY - sy;
+      if (dir.indexOf('e') >= 0) panelW = clampN(340, 1500, sw + dx);
+      if (dir.indexOf('w') >= 0) panelW = clampN(340, 1500, sw - dx);
+      const hiH = Math.max(160, vh - 140);
+      if (dir.indexOf('s') >= 0) { panelH = clampN(120, hiH, sh + dy); panelHSet = true; }
+      if (dir.indexOf('n') >= 0) { panelH = clampN(120, hiH, sh - dy); panelHSet = true; }
       applySize();
+      // Hold the opposite edge by measuring what the panel actually became, not
+      // by assuming it grew by exactly what was asked for: it is clamped at both
+      // ends, and until panelHSet it could refuse to grow at all.
+      const now = panelEl.getBoundingClientRect();
+      if (dir.indexOf('w') >= 0) host.style.setProperty('left', (r.right - now.width) + 'px', 'important');
+      if (dir.indexOf('n') >= 0) host.style.setProperty('top', (r.bottom - now.height) + 'px', 'important');
     };
-    const up = () => { winOf().removeEventListener('mousemove', mv); winOf().removeEventListener('mouseup', up); };
-    winOf().addEventListener('mousemove', mv); winOf().addEventListener('mouseup', up);
+    const up = () => {
+      winOf().removeEventListener('mousemove', mv);
+      winOf().removeEventListener('mouseup', up);
+      doc.body.style.cursor = prevCursor;
+      saveGeometry();
+    };
+    winOf().addEventListener('mousemove', mv);
+    winOf().addEventListener('mouseup', up);
     e.preventDefault();
+    e.stopPropagation();
   });
+}
+
+/* Anchor the panel by left/top. It starts pinned to the right and bottom edges,
+   which is what keeps it in the corner as the page window changes size — but an
+   edge drag has to move it, and that needs coordinates it can write to. */
+function pinHost() {
+  const r = host.getBoundingClientRect();
+  host.style.setProperty('left', r.left + 'px', 'important');
+  host.style.setProperty('top', r.top + 'px', 'important');
+  host.style.setProperty('right', 'auto', 'important');
+  host.style.setProperty('bottom', 'auto', 'important');
+  return r;
 }
 
 function saveGeometry() {
   if (IS_PANEL) return;
   try {
     const r = host.getBoundingClientRect();
-    api.storage.local.set({ geom: { left: r.left, top: r.top, w: panelW, h: laneH, ph: panelH } });
+    api.storage.local.set({ geom: { left: r.left, top: r.top, w: panelW, h: laneH, ph: panelH, hset: panelHSet } });
   } catch (e) {}
 }
 
@@ -1115,6 +1222,7 @@ function restoreGeometry() {
     api.storage.local.get('geom').then(({ geom }) => {
       if (!geom) return;
       panelW = geom.w || panelW; laneH = geom.h || laneH; panelH = geom.ph || panelH;
+      panelHSet = !!geom.hset;
       if (geom.left != null && geom.left < winOf().innerWidth - 60 && geom.top < winOf().innerHeight - 40) {
         host.style.setProperty('left', geom.left + 'px', 'important');
         host.style.setProperty('top', geom.top + 'px', 'important');
@@ -1212,6 +1320,7 @@ function createLane(spec) {
 
   lane.offEl.addEventListener('click', () => { lane.offset = 0; refreshAll(); });
 
+  if (lane.peaks) joinAlign(lane);
   if (lane.el) wireMedia(lane);
   wireMouse(lane);
 
@@ -1433,6 +1542,7 @@ async function loadPeaks(lane) {
   lane.peaks = peaks; lane.buffer = audio; lane.duration = peaks.duration;
   lane.metaEl.textContent = fmtSec(peaks.duration);
   if (dedupe(lane)) return;
+  joinAlign(lane);
   refreshAll();
   broadcastLane(lane);
 }

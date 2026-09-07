@@ -1,6 +1,6 @@
 # Waveform Viewer — 设计文档
 
-> 版本 1.2.0 · 对应源码 `src/content.js` (1781 行) / `src/page-hook.js` (235 行) / `src/background.js` (246 行)
+> 版本 1.3.0 · 对应源码 `src/content.js` (1891 行) / `src/page-hook.js` (235 行) / `src/background.js` (246 行)
 > 仓库 <https://github.com/EricZhou866/waveform-viewer> · MIT
 
 ---
@@ -128,7 +128,7 @@ const IS_PANEL = /-extension:$/.test(location.protocol);
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `src/content.js` | 1781 | 面板 UI、Lane 管理、时间轴、裁剪、播放、渲染、下载、设置 |
+| `src/content.js` | 1891 | 面板 UI、Lane 管理、时间轴、裁剪、播放、渲染、下载、设置 |
 | `src/page-hook.js` | 235 | 页面世界劫持，4 条发现路径 + 1 条补扫 |
 | `src/background.js` | 246 | 工具栏开关、CORS 代理、独立窗口所有权 |
 | `src/panel.html` | 13 | 独立窗口的空壳，只负责加载 `content.js` |
@@ -309,17 +309,19 @@ const laneCap = () => {
 
 ### 6.2.1 设置迁移
 
-老用户的 `settings.maxLanes` 已经是 4 存在 storage 里了，光改 `DEFAULTS` 对他们无效。加了 `SETTINGS_V`：
+改默认值对老用户是无效的：他们的 storage 里已经存着旧值。所以有 `SETTINGS_V`（当前 3），每次改默认值就加一档：
 
 ```js
-if (settings && settings.v !== SETTINGS_V) {
-  if (Number(settings.maxLanes) === 4) cfg.maxLanes = 0;   // 老默认值，抬掉
+if (settings && Number(settings.v) !== SETTINGS_V) {
+  const from = Number(settings.v) || 1;
+  if (from < 2 && Number(settings.maxLanes) === 4) cfg.maxLanes = 0;          // v1 的 4 条上限
+  if (from < 3 && Number(settings.minDur)  === 1) cfg.minDur  = DEFAULTS.minDur;  // v2 的 1 秒下限
   cfg.v = SETTINGS_V;
   saveSettings();
 }
 ```
 
-只迁移**恰好等于 4** 的那些——那是老默认值，不是用户选的。有人特意设成 2 或 8，就该保留。
+规则只有一条：**只迁移恰好等于旧默认值的那个数**。那是没人选过的值；有人特意设成 2 条或 8 条，就该原样保留。
 
 ### 6.3 `pin`
 
@@ -347,10 +349,10 @@ function isJunkSource(url) {
 
 ### 6.5 时长下限是可配的（v1.2.0）
 
-下限从写死的 `0.15s` 改成设置项 `minDur`，**范围 0.5–3 秒，默认 1 秒**：
+下限从写死的 `0.15s` 改成设置项 `minDur`，**范围 0.5–10 秒，默认 2 秒**：
 
 ```js
-const MIN_DUR_LO = 0.5, MIN_DUR_HI = 3;
+const MIN_DUR_LO = 0.5, MIN_DUR_HI = 10;
 const minDur = () => Math.max(MIN_DUR_LO, Math.min(MIN_DUR_HI, Number(cfg.minDur) || DEFAULTS.minDur));
 ```
 
@@ -496,7 +498,44 @@ for (let i = 0; i + run <= n; i++) {
 
 这样设计的好处：**Align 是可逆的**，再点一次全部 `trimB = null` 就恢复原状，不需要重新解码。`isTrimmed()` 遍历所有 Lane 判断当前处于哪个状态，按钮据此高亮。
 
-### 9.3 关闭裁剪时的降级
+### 9.3 默认就是对齐状态（v1.3.0）
+
+`autoAlign` 默认 `true`：**音频一进来就已经裁好、对齐好**，不需要点任何按钮。
+
+对比两段录音这件事，第一步永远是"把死气去掉再看"。既然每次都要点一次 Align，那它就该是默认状态，而不是一个动作。
+
+实现上关键的一步是把状态**显式化**。原来判断"当前是否已对齐"靠的是派生状态：
+
+```js
+const on = !isTrimmed();   // 有任何一条被裁过，就算处于对齐状态
+```
+
+这在"只有按钮能改变状态"的世界里够用，但后到的 Lane 必须知道该加入哪一边，派生状态答不了这个问题——面板空着的时候 `isTrimmed()` 是 `false`，第一条音频进来就会被当成"未对齐"。所以改成一个显式变量：
+
+```js
+let aligned = true;                  // 由 cfg.autoAlign 初始化，Align 按钮翻转它
+function alignOnsets() { aligned = !aligned; applyAlign(); }
+```
+
+新 Lane 通过 `joinAlign(lane)` 加入当前状态，**只动它自己**：
+
+```js
+function joinAlign(lane) {
+  if (!aligned || !lane || !lane.peaks) return;
+  if (!cfg.trimOnAlign) { applyAlign(); return;  }   // 偏移对齐是全局比较，只能整体重算
+  const b = soundBounds(lane);
+  if (b) { lane.trimA = b.a; lane.trimB = b.b; } else { lane.trimA = 0; lane.trimB = null; }
+  lane.offset = 0;
+}
+```
+
+**为什么不直接调 `applyAlign()`？** 它会把所有 Lane 的 offset 和选区清零。用户手动 Shift 平移过一条轨，然后网页又播了一段新音频——不该因此丢掉他刚调好的位置。裁剪是逐条独立的，所以只裁新来的那条。只有 `trimOnAlign` 关掉时的偏移对齐是个全局比较（要取所有起音点的最大值），那条路径没得选，只能整体重算。
+
+挂载点是"峰值到手"的两个时刻：`createLane()`（hook 直接带峰值来的）和 `loadPeaks()` 解码完成之后（在 `dedupe()` 之后，被合并掉的不必再算）。
+
+按钮的高亮也改成跟 `aligned` 走，不再跟 `isTrimmed()`——`trimOnAlign` 关掉时一条都不会被裁，但状态确实是"已对齐"，用派生状态会显示成没对齐。
+
+### 9.4 关闭裁剪时的降级
 
 设置里可以关掉 "Align crops silence"。此时 Align 退化为**按起音点平移对齐**：
 
@@ -659,9 +698,40 @@ laneH = Math.max(56, Math.min(420, Math.floor(avail / n) - 34));
 | 控件 | 改的是 |
 |------|--------|
 | `＋ / －` | `laneH` —— 单条波形画多高 |
-| 右下角 grip 拖拽 | `panelW` + `panelH` —— 面板本身多大，即一屏能看到几条 |
+| 四条边 / 四个角拖拽 | `panelW` + `panelH` —— 面板本身多大，即一屏能看到几条 |
 
-v1.1.5 的 grip 拖的是 `laneH`，和 `＋/－` 重复，而面板高度写死 `58vh` 没法调。现在两者分开，`panelH` 一起进 `geom` 持久化（`{ left, top, w, h, ph }`），下次打开还是这个尺寸。
+v1.1.5 的 grip 拖的是 `laneH`，和 `＋/－` 重复，而面板高度写死 `58vh` 没法调。
+
+### 11.5.1 八个把手（v1.3.0）
+
+四条边加四个角，各自 `position:absolute` 覆在 `.panel` 的边缘上（边 5px，角 12x12），**鼠标样式必须和它实际能动的方向一致**：
+
+| 把手 | cursor |
+|------|--------|
+| `n` / `s` / `.grip` | `ns-resize` |
+| `e` / `w` | `ew-resize` |
+| `nw` / `se` | `nwse-resize` |
+| `ne` / `sw` | `nesw-resize` |
+
+原来底部整条 grip 用的是 `nwse-resize`——一个只能上下动的地方却显示斜箭头，是在骗用户这次拖拽会做什么。
+
+三个实现要点：
+
+1. **拖北边/西边必须同时移动面板**，否则对边会跟着跑，面板从光标底下滑走。做法是先 `pinHost()` 把 `right/bottom` 锚定改成 `left/top`（默认锚在右下角，那是为了窗口缩放时贴住角落），再按对边不动来反推位置。
+2. **反推位置要量实际尺寸，不能拿"我请求了多少"去算**：
+
+```js
+applySize();
+const now = panelEl.getBoundingClientRect();
+if (dir.indexOf('w') >= 0) host.style.setProperty('left', (r.right - now.width)  + 'px', 'important');
+if (dir.indexOf('n') >= 0) host.style.setProperty('top',  (r.bottom - now.height) + 'px', 'important');
+```
+
+请求的高度会被上下限夹住，也可能**根本不生效**（见 §19.14），差值算错的结果就是面板在拖拽中平移。量一下现在多大，再把对边摆回原处，怎么夹都不会错。
+
+3. **拖拽期间锁住光标**：`doc.body.style.cursor = CURSOR[dir]`，`mouseup` 时还原。5px 的把手很窄，指针一旦滑出去光标就会变回页面的样式，看起来像拖拽断了。
+
+`panelHSet` 和 `panelH` 一起进 `geom` 持久化（`{ left, top, w, h, ph, hset }`）。
 
 ### 11.6 刻度
 
@@ -684,7 +754,7 @@ const minor = major / 5;
 | 按钮 | 动作 | 备注 |
 |------|------|------|
 | `▶ Play` / `■ Stop` | 同步播放全部未静音的轨 | 播放中变红 |
-| `⇱ Align` | 裁静音 + 对齐 | 可切换，已裁剪时高亮；再点一次还原 |
+| `⇱ Align` | 裁静音 + 对齐 | **默认就是开的**；再点一次还原全长，新来的音频也跟着不裁 |
 | `↔ Shift` | 切换拖动模式 | 拖动时按住 Shift 键可临时反转 |
 | `⊕ Files` | 打开本地文件 | 也支持拖拽到面板 |
 | `＋ / －` | 调 Lane 高度 | 仅页内模式 |
@@ -739,7 +809,8 @@ if (/INPUT|TEXTAREA|SELECT/.test(tag) || e.target.isContentEditable) return;
 |----|------|------|
 | Max lanes | 0（不限） | 0 = 不限；1–64 = 显式上限 |
 | When full | Keep what is shown | 或 Replace the oldest |
-| Ignore clips shorter than | 1s | 0.5–3s，见 §6.5 |
+| Ignore clips shorter than | 2s | 0.5–10s，见 §6.5 |
+| Align on arrival | on | 新音频进来即裁剪对齐，见 §9.3 |
 | Shared time scale | on | 关掉则每条独立缩放 |
 | Vertical zoom | Auto | 或 ×1 / ×2 / ×4 / ×8 |
 | Align crops silence | on | 关掉则 Align 退化为起音点平移 |
@@ -988,14 +1059,15 @@ Firefox 140+ 起，AMO 强制要求：
   "enabled": true,                 // 全局开关，工具栏按钮控制
 
   "settings": {                    // 用户设置
-    "v": 2,                        // schema 版本，用于默认值迁移（见 §6.2.1）
+    "v": 3,                        // schema 版本，用于默认值迁移（见 §6.2.1）
     "maxLanes": 0,                 // 0 = 不限，硬顶 64
+    "autoAlign": true,             // 新音频进来即裁剪对齐（见 §9.3）
     "whenFull": "keep",            // "keep" | "replace"
     "sync": true,
     "gain": "auto",                // "auto" | 1 | 2 | 4 | 8
     "trimOnAlign": true,
     "trimThresh": 0.08,            // 0.04 | 0.08 | 0.15
-    "minDur": 1                    // 0.5–3，短于此的片段直接忽略
+    "minDur": 2                    // 0.5–10，短于此的片段直接忽略
   },
 
   "panelLanes": [                  // 独立窗口的载荷快照（回退用）
@@ -1008,8 +1080,9 @@ Firefox 140+ 起，AMO 强制要求：
 外加 `geom` 键保存页内面板的几何信息，由 `saveGeometry()` / `restoreGeometry()` 维护：
 
 ```jsonc
-{ "left": 320, "top": 180, "w": 640, "h": 96, "ph": 460 }
-//                          panelW    laneH   panelH（Lane 区高度，见 §11.5）
+{ "left": 320, "top": 180, "w": 640, "h": 96, "ph": 460, "hset": true }
+//                          panelW    laneH   panelH          用户是否拖过竖直边
+//                                            （见 §11.5、§19.14）
 ```
 
 关掉扩展时 `panelLanes` 会被清空——"off 必须不留任何东西"。
@@ -1025,7 +1098,7 @@ Firefox 140+ 起，AMO 强制要求：
 | **默认不限条数** | 上限截断的音频在界面上完全不可见，比滚动一长串更糟。代价是内存随会话增长，靠 `LANE_HARD_MAX = 64` 和滚动兜住。 |
 | **满了排队而不是丢弃** | 用户显式设了上限时才会发生。用户明确要求"不要直接丢弃"。代价是需要维护停车场和 `flushParked()`。 |
 | **全局统一增益** | 保住了响度的可比性，代价是特别小声的那条可能看不太清。 |
-| **一份 `content.js` 双模式** | 面板窗口和页内面板永不行为漂移。代价是文件大（1781 行），且到处要判 `IS_PANEL`。 |
+| **一份 `content.js` 双模式** | 面板窗口和页内面板永不行为漂移。代价是文件大（1891 行），且到处要判 `IS_PANEL`。 |
 | **`postMessage` 而非 `wrappedJSObject`** | 可移植。代价是数据必须可克隆，且必须当作不可信输入校验。 |
 | **不用外部库** | 包体 45KB，无供应链风险，商店审核简单。代价是 WAV 编码器、峰值计算、绘图全部手写。 |
 | **Shadow DOM + `!important`** | 页面 CSS 打不进来。代价是调试时得展开 shadow root。 |
@@ -1119,6 +1192,17 @@ await api.windows.remove(id);
 **修法**：`closePanelWindow(notify)` 加一个参数，需要通知的调用方显式要求广播。先清 `panelWindowId` 的写法保留——它保证 `onRemoved` 不会再广播一次，两边合起来正好一次。
 **教训**：给一个只有单一调用方的函数加第二个调用方时，要重读它对全局状态的所有副作用，而不是只看它的名字。
 
+### 19.14 拖面板上边框，面板整个往上跑，尺寸没变
+
+**现象**：拖北边的把手往上拉，面板确实往上移了，但**没有变大**——高度纹丝不动，等于把面板拖走了。
+**原因**：Lane 区当时是 `max-height:${panelH}px`。`max-height` 只是个上限：轨的内容只有 260px 时，把上限从 400 提到 470 什么都不会发生。可位置补偿是按"我把 `panelH` 加了 70"算的，于是面板准准地往上平移了 70px。
+**修法**两条，缺一不可：
+
+1. 位置补偿改成量实际尺寸（`getBoundingClientRect()` 之后再摆对边），夹住也好、不生效也好，对边永远回到原处；
+2. 加 `panelHSet`：用户拖过竖直边之后，Lane 区从 `max-height` 改成**固定 `height`**。既然他明确指定了面板多高，那就应该是那么高，哪怕下面空着。没拖过时仍然按内容自适应——一条轨的面板不该默认撑出 460px 的空洞。
+
+**教训**：`max-height` 是"最多这么高"，不是"就这么高"。任何按增量反推位置的代码，都在假设那个增量真的发生了。
+
 ---
 
 ## 20. 测试策略
@@ -1143,11 +1227,14 @@ npm i -D playwright && npx playwright install chromium
 node test/e2e.js
 ```
 
-27 项断言，覆盖：面板注入与版本号显示、Lane 区滚动、时长下限（默认 1s 下过滤 0.30s / 0.70s，调到 0.5s 后 0.70s 进来、0.30s 仍被挡，调到 2s 后已存在的 0.70s 轨被清掉）、设置项默认值与范围、设置底部的版本与仓库链接、grip 拖拽改面板尺寸并跨刷新持久化、**默认设置下 6 条音频全部成轨且列表在面板自身高度上滚动、队列为空**、老 profile 的 4 条上限被迁移掉、弹出窗口 → `⇲ Dock` → 页内面板回来的整条回路、以及全程零 JS 错误。
+42 项断言，覆盖：面板注入与版本号显示、Lane 区滚动、时长下限（默认 1s 下过滤 0.30s / 0.70s，调到 0.5s 后 0.70s 进来、0.30s 仍被挡，调到 2s 后已存在的 0.70s 轨被清掉）、设置项默认值与范围、设置底部的版本与仓库链接、grip 拖拽改面板尺寸并跨刷新持久化、**默认设置下 6 条音频全部成轨且列表在面板自身高度上滚动、队列为空**、音频到达即裁剪对齐（含关掉 Align 后新音频保持全长、再打开时连后到的那条一起裁）、八个把手的 cursor 取值、拖西边/北边时对边不动、grip 只改高度、SE 角同时改两边、尺寸跨刷新持久化、老 profile 的两档设置迁移、弹出窗口 → `⇲ Dock` → 页内面板回来的整条回路、以及全程零 JS 错误。
 
-v1.2.0 全部通过，AMO linter 0/0/0。
+v1.3.0 全部通过，AMO linter 0/0/0。
 
-**素材必须互不相同。** 第一版"6 条音频"的素材只改了频率，长度和包络一模一样——结果 6 条被 §7 的指纹合并成 1 条，看起来像上限没去掉。指纹只看 32 桶的相对响度加时长，听感上的音高差异它根本不看。
+两个写测试时踩的坑：
+
+- **素材必须互不相同。** 第一版"6 条音频"的素材只改了频率，长度和包络一模一样——结果 6 条被 §7 的指纹合并成 1 条，看起来像上限没去掉。指纹只看 32 桶的相对响度加时长，听感上的音高差异它根本不看。
+- **拖过边框之后面板会跑出视口。** 连着拖西、北、东三条边，面板右边缘就出了屏幕，接下来点 SE 角的 `mouse.move` 会被夹回视口内，点了个空。所以每段拖拽前先 `moveTo()` 把面板挪回一个确定的位置。
 
 ### 20.3 测试环境的三个硬约束
 
@@ -1225,4 +1312,4 @@ src/ + manifests/<target>.json  →  build/<target>/  →  dist/*.zip
 
 ---
 
-*文档对应 v1.2.0。修改代码时请同步更新本文档中受影响的小节（含 §3.2 的行数表与本行的版本号）。*
+*文档对应 v1.3.0。修改代码时请同步更新本文档中受影响的小节（含 §3.2 的行数表与本行的版本号）。*

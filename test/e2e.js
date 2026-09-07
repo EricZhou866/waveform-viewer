@@ -113,13 +113,44 @@ const SR = `(() => { const h = document.getElementById('__wf_viewer_host'); retu
   let ns = await names();
   ok('the 4.70s and 3.0s clips got lanes', ns.length === 2, ns);
   ok('0.30s blip filtered out', !ns.some(x => /blip/.test(x)), ns);
-  ok('0.70s clip filtered out at the 1s default', !ns.some(x => /short/.test(x)), ns);
+  ok('0.70s clip filtered out at the 2s default', !ns.some(x => /short/.test(x)), ns);
+
+  /* arriving audio is cropped and aligned with no click */
+  const meta = () => page.evaluate(`(() => [...${SR}.querySelectorAll('.lane')].map(l => ({
+      name: l.querySelector('.name').textContent,
+      meta: l.querySelector('.meta').textContent,
+      off:  l.querySelector('.off').textContent }))) ()`);
+  let ms = await meta();
+  ok('new audio is cropped on arrival', ms.length === 2 && ms.every(m => m.meta.indexOf('\u2702') >= 0), ms);
+  ok('the 4.70s clip is cropped down to its sound', ms.length === 2 && parseFloat(ms[0].meta) < 3, ms);
+  ok('cropped lanes all start at zero', ms.every(m => m.off === ''), ms);
+  ok('the Align button reads as on', await page.evaluate(`${SR}.querySelector('[data-act="align"]').classList.contains('on')`));
+
+  /* turning Align off restores the full clips, and later arrivals stay whole */
+  await page.evaluate(`${SR}.querySelector('[data-act="align"]').click()`);
+  await sleep(300);
+  ms = await meta();
+  ok('clicking Align restores the full clips', ms.every(m => m.meta.indexOf('\u2702') < 0), ms);
+  await page.evaluate(`window.playSet(['c6.mp3'])`);
+  await sleep(1600);
+  ms = await meta();
+  ok('audio arriving while Align is off is left whole',
+     ms.length === 3 && ms.every(m => m.meta.indexOf('\u2702') < 0), ms);
+  await page.evaluate(`${SR}.querySelector('[data-act="align"]').click()`);
+  await sleep(300);
+  ms = await meta();
+  ok('clicking Align again crops everything, including the late arrival',
+     ms.length === 3 && ms.every(m => m.meta.indexOf('\u2702') >= 0), ms);
+  await page.evaluate(`${SR}.querySelector('[data-act="clear"]').click()`);
+  await sleep(200);
+  await page.evaluate(`window.playSet(['ref.mp3','mine.mp3'])`);
+  await sleep(2200);
 
   await page.evaluate(`${SR}.querySelector('[data-act="settings"]').click()`);
   const minIn = await page.evaluate(`(() => { const i = [...${SR}.querySelectorAll('.sheet input[type=number]')][1];
       return i && { v: i.value, min: i.min, max: i.max }; })()`);
-  ok('minimum-length setting is there: default 1, range 0.5-3',
-     minIn && minIn.v === '1' && minIn.min === '0.5' && minIn.max === '3', minIn);
+  ok('minimum-length setting is there: default 2, range 0.5-10',
+     minIn && minIn.v === '2' && minIn.min === '0.5' && minIn.max === '10', minIn);
 
   const maxIn = await page.evaluate(`(() => { const i = ${SR}.querySelector('.sheet input[type=number]');
       return i && { v: i.value, min: i.min }; })()`);
@@ -148,6 +179,63 @@ const SR = `(() => { const h = document.getElementById('__wf_viewer_host'); retu
   await setMin('0.5');
   await page.evaluate(`${SR}.querySelector('[data-act="settings"]').click()`);
 
+  /* every edge and corner resizes, and each advertises the right cursor */
+  const cursors = await page.evaluate(`(() => { const out = {};
+      ${SR}.querySelectorAll('.rs').forEach(h => { out[h.dataset.rs] = getComputedStyle(h).cursor; });
+      out.grip = getComputedStyle(${SR}.querySelector('.grip')).cursor;
+      return out; })()`);
+  ok('all eight edges and corners have a handle', Object.keys(cursors).length === 9, cursors);
+  ok('vertical edges use a vertical cursor, not a diagonal one',
+     cursors.n === 'ns-resize' && cursors.s === 'ns-resize' && cursors.grip === 'ns-resize', cursors);
+  ok('horizontal edges use a horizontal cursor', cursors.e === 'ew-resize' && cursors.w === 'ew-resize', cursors);
+  ok('corners use the matching diagonal cursors',
+     cursors.nw === 'nwse-resize' && cursors.se === 'nwse-resize' &&
+     cursors.ne === 'nesw-resize' && cursors.sw === 'nesw-resize', cursors);
+
+  // Park the panel somewhere known first: the edge drags below move it around,
+  // and a handle that has drifted off-screen cannot be clicked.
+  const moveTo = async (x, y) => {
+    const g = await page.evaluate(`(() => { const t = ${SR}.querySelector('.title').getBoundingClientRect();
+        const p = ${SR}.querySelector('.panel').getBoundingClientRect();
+        return { tx: t.left + 20, ty: t.top + t.height / 2, pl: p.left, pt: p.top }; })()`);
+    await page.mouse.move(g.tx, g.ty);
+    await page.mouse.down();
+    await page.mouse.move(g.tx + (x - g.pl), g.ty + (y - g.pt), { steps: 6 });
+    await page.mouse.up();
+    await sleep(200);
+  };
+
+  const dragEdge = async (which, dx, dy) => {
+    const h = await page.evaluate(`(() => { const r = ${SR}.querySelector('.rs-${which}').getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+    await page.mouse.move(h.x, h.y);
+    await page.mouse.down();
+    await page.mouse.move(h.x + dx, h.y + dy, { steps: 6 });
+    await page.mouse.up();
+    await sleep(200);
+  };
+  const box = () => page.evaluate(`(() => { const r = ${SR}.querySelector('.panel').getBoundingClientRect();
+      return { l: Math.round(r.left), t: Math.round(r.top), r: Math.round(r.right), b: Math.round(r.bottom) }; })()`);
+
+  await moveTo(360, 140);
+  let b0 = await box();
+  await dragEdge('w', -80, 0);
+  let b1 = await box();
+  ok('the west edge widens the panel and holds the right edge still',
+     b1.l < b0.l - 40 && Math.abs(b1.r - b0.r) < 3, { b0, b1 });
+
+  b0 = b1;
+  await dragEdge('n', 0, -70);
+  b1 = await box();
+  ok('the north edge grows the panel upward and holds the bottom still',
+     b1.t < b0.t - 30 && Math.abs(b1.b - b0.b) < 3, { b0, b1 });
+
+  b0 = b1;
+  await dragEdge('e', 60, 0);
+  b1 = await box();
+  ok('the east edge widens the panel and holds the left edge still',
+     b1.r > b0.r + 30 && Math.abs(b1.l - b0.l) < 3, { b0, b1 });
+
   /* the grip sizes the panel, and the size sticks */
   const size = () => page.evaluate(`(() => ({ w: ${SR}.querySelector('.panel').getBoundingClientRect().width,
       h: parseFloat(getComputedStyle(${SR}.querySelector('.lanes')).maxHeight) }))()`);
@@ -160,15 +248,23 @@ const SR = `(() => { const h = document.getElementById('__wf_viewer_host'); retu
   await page.mouse.up();
   await sleep(300);
   const after = await size();
-  ok('dragging the grip widens the panel', after.w > before.w + 60, { before, after });
-  ok('dragging the grip shortens the lane area', after.h < before.h - 40, { before, after });
+  ok('the grip is the bottom edge: height only, width untouched',
+     after.h < before.h - 40 && Math.abs(after.w - before.w) < 3, { before, after });
 
+  await moveTo(300, 120);
+  const beforeSE = await size();
+  await dragEdge('se', 90, 70);
+  const afterSE = await size();
+  ok('the south-east corner resizes both ways at once',
+     afterSE.w > beforeSE.w + 40 && afterSE.h > beforeSE.h + 30, { beforeSE, afterSE });
+
+  const sized = await size();
   await page.reload(); await sleep(600);
   await page.evaluate(`window.playSet(['ref.mp3'])`);
   await sleep(1800);
   const restored = await size();
   ok('the panel size survives a reload',
-     Math.abs(restored.w - after.w) < 3 && Math.abs(restored.h - after.h) < 3, { after, restored });
+     Math.abs(restored.w - sized.w) < 3 && Math.abs(restored.h - sized.h) < 3, { sized, restored });
 
   /* six clips, default settings: every one gets a lane, and the list scrolls at
      the panel's own height — nothing is parked out of sight */
@@ -209,14 +305,16 @@ const SR = `(() => { const h = document.getElementById('__wf_viewer_host'); retu
   const sw = ctx.serviceWorkers()[0];
   ok('background service worker is running', !!sw);
   if (sw) {
-    await sw.evaluate(`chrome.storage.local.set({ settings: { maxLanes: 4, minDur: 1 } })`);
+    await sw.evaluate(`chrome.storage.local.set({ settings: { v: 1, maxLanes: 4, minDur: 1 } })`);
     await page.reload(); await sleep(600);
+    // c1 (1.56s) and c2 (1.87s) fall under the migrated 2s floor; c3-c5 clear it
     await page.evaluate(`window.playSet(['c1.mp3','c2.mp3','c3.mp3','c4.mp3','c5.mp3'])`);
     await sleep(3000);
-    const migrated = await page.evaluate(`(() => ({ n: ${SR}.querySelectorAll('.lane').length,
-        cap: ${SR}.querySelector('.sheet input[type=number]').value }))()`);
-    ok('an old profile stuck at the 4-lane default is migrated to no cap',
-       migrated.cap === '0' && migrated.n === 5, migrated);
+    const migrated = await page.evaluate(`(() => { const ins = [...${SR}.querySelectorAll('.sheet input[type=number]')];
+        return { n: ${SR}.querySelectorAll('.lane').length, cap: ins[0].value, min: ins[1].value }; })()`);
+    ok('an old profile stuck at the 4-lane default is migrated to no cap', migrated.cap === '0', migrated);
+    ok('an old profile stuck at the 1s minimum is migrated to 2s',
+       migrated.min === '2' && migrated.n === 3, migrated);
   }
 
   ok('no page JS errors', errors.length === 0, errors);

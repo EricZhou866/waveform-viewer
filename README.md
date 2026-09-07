@@ -52,9 +52,9 @@ The panel appears in the bottom-right as soon as audio is detected.
 | Button | What it does |
 |---|---|
 | `▶ Play` | Play every un-muted lane together on one playhead. Stops and rewinds to the start when the longest lane finishes. `Ctrl/⌘ + Space` |
-| `⇱ Align` | **Crop the silence off both ends of every clip** and start them together. Click again to restore the full clips |
+| `⇱ Align` | **On by default** — audio arrives already cropped to its sound and starting at zero. Click to restore the full clips; audio that arrives while it is off stays whole |
 | `↔ Shift` | Drag a lane sideways to align by hand (hold **Shift** to toggle temporarily). The ruler stays put; the waveform slides |
-| `＋` / `－` | Lane height. Drag the grip at the bottom-right corner to resize the panel itself — width, and how many lanes are on screen before the list scrolls |
+| `＋` / `－` | Lane height. Drag any edge or corner of the panel to resize it — that sets how many lanes are on screen before the list scrolls |
 | `⚙` | Settings |
 | `⊕ Files` | Open audio files from your computer (or just drag them onto the panel) |
 | `⧉ Window` | Open the panel as its own browser window — drag it to a second monitor. The in-page panel steps aside while it is open |
@@ -78,7 +78,8 @@ The panel appears in the bottom-right as soon as audio is detected.
 | Setting | Default | What it does |
 |---|---|---|
 | Max lanes | 0 — no limit | Every clip gets a lane and the list scrolls. Set a number (1–64) if you would rather cap it; past the cap, new audio waits in a queue instead of being thrown away |
-| Ignore clips shorter than | 1 s | Anything shorter never gets a lane (0.5–3 s). Players fire silent primers before playback, and sites throw in UI blips and ad stingers; without a floor those crowd out what you are actually comparing. Lower it if you are working with very short clips — lanes already on screen are re-checked as soon as you change it |
+| Ignore clips shorter than | 2 s | Anything shorter never gets a lane (0.5–10 s). Players fire silent primers before playback, and sites throw in UI blips and ad stingers; without a floor those crowd out what you are actually comparing. Lower it if you are working with very short clips — lanes already on screen are re-checked as soon as you change it |
+| Align on arrival | on | New audio comes in cropped to its sound and starting at zero, with no click. Turn it off to see clips at full length |
 | When full | Keep what is shown | Only applies once you set a limit. New audio is **parked, never discarded** — it slots in as soon as you close a lane or raise the limit. Switch to "Replace the oldest" for the old behaviour |
 | Shared time scale | on | Lanes use one ruler so they line up vertically |
 | Vertical zoom | Auto | Same factor for every lane, so loudness stays comparable |
@@ -127,10 +128,10 @@ problem with one clip never leaves you without a window.
 1. Play the reference clip — lane 1 appears. Pin it with `☆`.
    (Or use `⊕ Files` / drag-and-drop if you already have the file on disk.)
 2. Play your own recording — lane 2 appears.
-3. Hit `⇱ Align`. The silence at both ends is cropped and both clips start
-   together, so the speech itself is what you are comparing. A `✂` next to the
-   duration marks a cropped lane; the download button then saves exactly what is
-   on screen.
+3. Both clips are already cropped and started together — that is what `⇱ Align`
+   does, and it is on by default, so the speech itself is what you are comparing.
+   A `✂` next to the duration marks a cropped lane, and the download button then
+   saves exactly what is on screen. Click `⇱ Align` if you want the full clips back.
 4. `▶ Play` to hear them layered; `🔇` one lane to hear just the other.
 5. Drag across any pause to read its exact length.
 6. `⬇` to save a region as WAV.
@@ -153,7 +154,7 @@ media elements 2 · decoded 1 · audio requests 3 · page hook active
   replay from memory without touching the network, so there is nothing for the
   detector to see.
 - **A clip you wanted never shows up** — it may be shorter than the minimum length
-  (Settings ▸ *Ignore clips shorter than*, 1 s by default). Lower it and play the
+  (Settings ▸ *Ignore clips shorter than*, 2 s by default). Lower it and play the
   audio again. The floor exists because many players fire a silent `data:` primer
   before every playback to unlock the audio context, and those would otherwise pile
   up as empty lanes. A source that turns out not to be usable audio is remembered
