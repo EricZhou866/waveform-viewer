@@ -15,8 +15,10 @@ const api = (typeof browser !== 'undefined') ? browser : chrome;
 const IS_PANEL = /-extension:$/.test(location.protocol);
 
 /* User-visible settings, persisted in extension storage. */
+const SETTINGS_V = 2;   // bumped when a default changes in a way that must migrate
 const DEFAULTS = {
-  maxLanes: 4,          // how many lanes can be on screen at once
+  v: SETTINGS_V,
+  maxLanes: 0,          // 0 = no cap: every clip gets a lane, and the list scrolls
   whenFull: 'keep',     // 'keep' = never discard silently | 'replace' = evict oldest
   sync: true,           // one shared time scale across lanes
   gain: 'auto',         // 'auto' | 1 | 2 | 4 | 8
@@ -52,6 +54,15 @@ let gainVal = 1;
    and slots in as soon as a lane frees up or the limit is raised. */
 const parked = [];
 const PARK_MAX = 12;
+/* A cap only exists if the user asks for one. This is the backstop against a
+   session that runs for hours: every lane holds a decoded AudioBuffer, so an
+   unbounded list is an unbounded memory leak. Reaching it is reported, never
+   silent. */
+const LANE_HARD_MAX = 64;
+const laneCap = () => {
+  const n = Math.max(0, parseInt(cfg.maxLanes, 10) || 0);
+  return n > 0 ? Math.min(n, LANE_HARD_MAX) : LANE_HARD_MAX;
+};
 
 /* Sources that turned out not to be usable audio — typically the silent
    `data:` primer many players fire before every playback to unlock the audio
@@ -641,6 +652,14 @@ function loadSettings() {
   try {
     return api.storage.local.get('settings').then(({ settings }) => {
       cfg = Object.assign({}, DEFAULTS, settings || {});
+      // v1 capped at 4 by default, which parked everything past the fourth clip
+      // where nobody could see it. Anyone still sitting on that exact number was
+      // never choosing it, so lift it; a deliberate 1-3 or 5-8 is left alone.
+      if (settings && settings.v !== SETTINGS_V) {
+        if (Number(settings.maxLanes) === 4) cfg.maxLanes = 0;
+        cfg.v = SETTINGS_V;
+        saveSettings();
+      }
       return cfg;
     }).catch(() => cfg);
   } catch (e) { return Promise.resolve(cfg); }
@@ -680,15 +699,16 @@ function buildSettings(panel) {
     return r;
   };
 
-  const maxIn = mk('input', { type: 'number', className: 'num', min: '1', max: '8', step: '1' });
+  const maxIn = mk('input', { type: 'number', className: 'num', min: '0', max: String(LANE_HARD_MAX), step: '1' });
   maxIn.value = String(cfg.maxLanes);
   maxIn.addEventListener('change', () => {
-    cfg.maxLanes = Math.max(1, Math.min(8, parseInt(maxIn.value, 10) || DEFAULTS.maxLanes));
+    const v = parseInt(maxIn.value, 10);
+    cfg.maxLanes = isFinite(v) ? Math.max(0, Math.min(LANE_HARD_MAX, v)) : 0;
     maxIn.value = String(cfg.maxLanes);
     saveSettings();
     flushParked();
   });
-  row('Max lanes', maxIn, 'How many waveforms can be compared at once');
+  row('Max lanes', maxIn, '0 = no limit: every clip gets a lane and the list scrolls');
 
   const fullSel = mk('select', { className: 'pick' });
   [['keep', 'Keep what is shown'], ['replace', 'Replace the oldest']].forEach(([v, t]) => {
@@ -799,8 +819,10 @@ function paintStatus() {
     statusEl.appendChild(document.createTextNode('\u23f3 '));
     statusEl.appendChild(w);
     statusEl.appendChild(document.createTextNode(
-      ' clip' + (parked.length > 1 ? 's' : '') + ' waiting \u2014 ' + lanes.size + '/' +
-      cfg.maxLanes + ' lanes in use. Close a lane, or raise Max lanes in Settings.'));
+      ' clip' + (parked.length > 1 ? 's' : '') + ' waiting \u2014 ' + lanes.size + '/' + laneCap() +
+      ' lanes in use. ' + (Number(cfg.maxLanes) > 0
+        ? 'Close a lane, or raise Max lanes in Settings.'
+        : 'Close a lane to let the next one in.')));
     return;
   }
   if (IS_PANEL) {
@@ -1113,7 +1135,7 @@ function createLane(spec) {
     addEventListener('DOMContentLoaded', () => pending.splice(0).forEach(offer), { once: true });
     return;
   }
-  if (lanes.size >= cfg.maxLanes) {
+  if (lanes.size >= laneCap()) {
     if (cfg.whenFull === 'replace') {
       const victim = [...lanes.entries()].find(([, l]) => !l.pinned);
       if (victim) dropLane(victim[0]);
@@ -1225,7 +1247,7 @@ function park(spec) {
 
 /* Let waiting clips in as soon as there is room. */
 function flushParked() {
-  while (parked.length && lanes.size < cfg.maxLanes) {
+  while (parked.length && lanes.size < laneCap()) {
     const spec = parked.shift();
     if (!lanes.has(spec.key)) createLane(spec);
   }

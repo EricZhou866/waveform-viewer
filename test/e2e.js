@@ -47,6 +47,12 @@ const FILES = {
   'mine.mp3':  wav([sil(0.4), tone(1.6, 330, 0.4), sil(1.0)]),
   'short.mp3': wav([tone(0.70, 660, 0.5)]),   // passes at 0.5s, filtered at 1s
   'blip.mp3':  wav([tone(0.30, 880, 0.5)]),   // always filtered
+  // Six ordinary clips for the "no cap, it just scrolls" run. They must differ in
+  // shape and length, not just pitch: the de-dupe fingerprint is a 32-bucket
+  // loudness envelope plus the duration, and identical envelopes merge (§7).
+  ...Object.fromEntries([1, 2, 3, 4, 5, 6].map(i =>
+    ['c' + i + '.mp3', wav([sil(0.1 * i), tone(0.8 + 0.21 * i, 200 + i * 90, 0.25 + 0.1 * i),
+                            sil(0.15), tone(0.3, 300 + i * 40, 0.5 - 0.05 * i)])])),
   't.html': Buffer.from(`<!doctype html><meta charset="utf-8"><title>web audio only</title>
 <h3>no &lt;audio&gt; element on this page</h3>
 <script>
@@ -115,6 +121,10 @@ const SR = `(() => { const h = document.getElementById('__wf_viewer_host'); retu
   ok('minimum-length setting is there: default 1, range 0.5-3',
      minIn && minIn.v === '1' && minIn.min === '0.5' && minIn.max === '3', minIn);
 
+  const maxIn = await page.evaluate(`(() => { const i = ${SR}.querySelector('.sheet input[type=number]');
+      return i && { v: i.value, min: i.min }; })()`);
+  ok('Max lanes defaults to 0, meaning no cap', maxIn && maxIn.v === '0' && maxIn.min === '0', maxIn);
+
   const foot = await page.evaluate(`(() => { const f = ${SR}.querySelector('.foot'), a = f && f.querySelector('a');
       return f && { t: f.textContent, href: a && a.href, tgt: a && a.target }; })()`);
   ok('settings footer carries the version and the repo link',
@@ -160,14 +170,18 @@ const SR = `(() => { const h = document.getElementById('__wf_viewer_host'); retu
   ok('the panel size survives a reload',
      Math.abs(restored.w - after.w) < 3 && Math.abs(restored.h - after.h) < 3, { after, restored });
 
-  /* more lanes than fit: they scroll instead of vanishing below the fold */
-  await page.evaluate(`(() => { const i = ${SR}.querySelector('.sheet input[type=number]'); i.value = '8'; i.dispatchEvent(new Event('change')); })()`);
-  await page.evaluate(`window.playSet(['ref.mp3','mine.mp3','short.mp3','blip.mp3'])`);
-  await sleep(2200);
-  await page.evaluate(`${SR}.querySelector('.lanes').style.maxHeight = '160px'`);
-  const scrolls = await page.evaluate(`(() => { const b = ${SR}.querySelector('.lanes');
-      return { n: b.querySelectorAll('.lane').length, sh: b.scrollHeight, ch: b.clientHeight }; })()`);
-  ok('overflowing lanes scroll rather than disappear', scrolls.sh > scrolls.ch + 10, scrolls);
+  /* six clips, default settings: every one gets a lane, and the list scrolls at
+     the panel's own height — nothing is parked out of sight */
+  await page.evaluate(`${SR}.querySelector('[data-act="clear"]').click()`);
+  await sleep(300);
+  await page.evaluate(`window.playSet(['c1.mp3','c2.mp3','c3.mp3','c4.mp3','c5.mp3','c6.mp3'])`);
+  await sleep(3200);
+  const many = await page.evaluate(`(() => { const b = ${SR}.querySelector('.lanes');
+      return { n: b.querySelectorAll('.lane').length, sh: b.scrollHeight, ch: b.clientHeight,
+               status: ${SR}.querySelector('.status').textContent }; })()`);
+  ok('all six clips get a lane — nothing parked out of sight', many.n === 6, many);
+  ok('nothing is left waiting in the queue', many.status.indexOf('waiting') === -1, many.status);
+  ok('the lane list scrolls at the panel default height', many.sh > many.ch + 10, many);
 
   /* pop out to the standalone window, then dock back */
   await page.evaluate(`${SR}.querySelector('[data-act="pop"]').click()`);
@@ -189,6 +203,20 @@ const SR = `(() => { const h = document.getElementById('__wf_viewer_host'); retu
     ok('Dock closes the standalone window', !ctx.pages().some(p => p.url().includes('panel.html')));
     ok('the in-page panel comes back after docking',
        (await page.evaluate(`getComputedStyle(document.getElementById('__wf_viewer_host')).display`)) === 'block');
+  }
+
+  /* a profile carrying the old default cap of 4 is lifted on load */
+  const sw = ctx.serviceWorkers()[0];
+  ok('background service worker is running', !!sw);
+  if (sw) {
+    await sw.evaluate(`chrome.storage.local.set({ settings: { maxLanes: 4, minDur: 1 } })`);
+    await page.reload(); await sleep(600);
+    await page.evaluate(`window.playSet(['c1.mp3','c2.mp3','c3.mp3','c4.mp3','c5.mp3'])`);
+    await sleep(3000);
+    const migrated = await page.evaluate(`(() => ({ n: ${SR}.querySelectorAll('.lane').length,
+        cap: ${SR}.querySelector('.sheet input[type=number]').value }))()`);
+    ok('an old profile stuck at the 4-lane default is migrated to no cap',
+       migrated.cap === '0' && migrated.n === 5, migrated);
   }
 
   ok('no page JS errors', errors.length === 0, errors);

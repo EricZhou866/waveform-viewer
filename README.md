@@ -77,9 +77,9 @@ The panel appears in the bottom-right as soon as audio is detected.
 
 | Setting | Default | What it does |
 |---|---|---|
-| Max lanes | 4 | How many waveforms fit on screen (1–8) |
+| Max lanes | 0 — no limit | Every clip gets a lane and the list scrolls. Set a number (1–64) if you would rather cap it; past the cap, new audio waits in a queue instead of being thrown away |
 | Ignore clips shorter than | 1 s | Anything shorter never gets a lane (0.5–3 s). Players fire silent primers before playback, and sites throw in UI blips and ad stingers; without a floor those crowd out what you are actually comparing. Lower it if you are working with very short clips — lanes already on screen are re-checked as soon as you change it |
-| When full | Keep what is shown | New audio is **parked, never discarded** — it slots in as soon as you close a lane or raise the limit. Switch to "Replace the oldest" for the old behaviour |
+| When full | Keep what is shown | Only applies once you set a limit. New audio is **parked, never discarded** — it slots in as soon as you close a lane or raise the limit. Switch to "Replace the oldest" for the old behaviour |
 | Shared time scale | on | Lanes use one ruler so they line up vertically |
 | Vertical zoom | Auto | Same factor for every lane, so loudness stays comparable |
 | Align crops silence | on | Turn off to make Align line up onsets by offset instead |
@@ -112,7 +112,8 @@ with `⊕ Files` or by dropping them in. Note that the hand-over is one-way: fil
 opened *in the window* do not travel back to the page when you dock.
 
 More lanes than fit on screen scroll inside the panel rather than disappearing below
-its bottom edge, in both the in-page panel and the window.
+its bottom edge, in both the in-page panel and the window. Nothing is held back out of
+sight: every clip that passes the minimum length gets a lane.
 
 Audio the page holds as a `blob:` URL cannot be fetched from an extension page, so
 those clips travel to the window as bytes instead — you get the waveform either way.
@@ -164,7 +165,8 @@ media elements 2 · decoded 1 · audio requests 3 · page hook active
 
 - MSE / DRM-protected streams cannot be decoded
 - Files over 60 MB are skipped
-- 4 lanes at once by default, up to 8 (Settings ▸ Max lanes)
+- No limit on lanes by default — they scroll. A hard ceiling of 64 keeps a long
+  session from growing without bound, since every lane holds a decoded buffer
 - Repeats of the same clip are merged automatically: many sites mint a new
   `blob:` URL on every play, so lanes are de-duplicated by an audio fingerprint
   rather than by URL

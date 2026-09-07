@@ -1,6 +1,6 @@
 # Waveform Viewer — 设计文档
 
-> 版本 1.2.0 · 对应源码 `src/content.js` (1759 行) / `src/page-hook.js` (235 行) / `src/background.js` (246 行)
+> 版本 1.2.0 · 对应源码 `src/content.js` (1781 行) / `src/page-hook.js` (235 行) / `src/background.js` (246 行)
 > 仓库 <https://github.com/EricZhou866/waveform-viewer> · MIT
 
 ---
@@ -128,7 +128,7 @@ const IS_PANEL = /-extension:$/.test(location.protocol);
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `src/content.js` | 1759 | 面板 UI、Lane 管理、时间轴、裁剪、播放、渲染、下载、设置 |
+| `src/content.js` | 1781 | 面板 UI、Lane 管理、时间轴、裁剪、播放、渲染、下载、设置 |
 | `src/page-hook.js` | 235 | 页面世界劫持，4 条发现路径 + 1 条补扫 |
 | `src/background.js` | 246 | 工具栏开关、CORS 代理、独立窗口所有权 |
 | `src/panel.html` | 13 | 独立窗口的空壳，只负责加载 `content.js` |
@@ -285,12 +285,41 @@ stateDiagram-v2
 
 ### 6.2 容量与"停车场"
 
-默认最多 4 条（1–8 可配）。满了以后有两种策略：
+**默认不限条数**（`maxLanes: 0`）。每条发现的音频都生成 Lane，放不下就滚动（见 §11.5）。
+
+v1.1.5 默认上限是 4，第 5 条起进 `parked[]` 排队。排队的本意是"绝不静默丢弃"，但实际效果是**用户看不见它们**——状态行有一行提示，可那一行既不是波形也不能点开，等于音频进了后台。上限本身才是问题：既然多出来的轨可以滚动到，就没有理由在 4 条上截断。
+
+用户仍可以主动设一个上限（1–64），设了之后原来的两种策略照旧：
 
 - **`keep`（默认）** — 新音频进 `parked[]` 排队，**绝不静默丢弃**。用户关掉一条或调高上限，`flushParked()` 立刻放行。
 - **`replace`** — 淘汰最早的未 pin Lane；全都 pin 了就还是排队。
 
-这是明确的产品决策。默认丢弃新音频会造成"我明明播了，为什么没出来"的困惑；默认淘汰旧的会把用户正在比对的东西挤掉。排队是唯一不会让人意外的行为。`PARK_MAX = 12`，超了从队头丢，避免长会话内存无限增长。
+`PARK_MAX = 12`，超了从队头丢。
+
+**`LANE_HARD_MAX = 64`** 是唯一的硬顶：
+
+```js
+const laneCap = () => {
+  const n = Math.max(0, parseInt(cfg.maxLanes, 10) || 0);
+  return n > 0 ? Math.min(n, LANE_HARD_MAX) : LANE_HARD_MAX;
+};
+```
+
+每条 Lane 拿着一个解码后的 `AudioBuffer`（4 分钟立体声约 40MB），真的不封顶就是一个开着的内存泄漏。64 条对"对比几段录音"这个用途远远够用，撞上了也会在状态行里说清楚，不静默。
+
+### 6.2.1 设置迁移
+
+老用户的 `settings.maxLanes` 已经是 4 存在 storage 里了，光改 `DEFAULTS` 对他们无效。加了 `SETTINGS_V`：
+
+```js
+if (settings && settings.v !== SETTINGS_V) {
+  if (Number(settings.maxLanes) === 4) cfg.maxLanes = 0;   // 老默认值，抬掉
+  cfg.v = SETTINGS_V;
+  saveSettings();
+}
+```
+
+只迁移**恰好等于 4** 的那些——那是老默认值，不是用户选的。有人特意设成 2 或 8，就该保留。
 
 ### 6.3 `pin`
 
@@ -708,7 +737,7 @@ if (/INPUT|TEXTAREA|SELECT/.test(tag) || e.target.isContentEditable) return;
 
 | 项 | 默认 | 说明 |
 |----|------|------|
-| Max lanes | 4 | 1–8 |
+| Max lanes | 0（不限） | 0 = 不限；1–64 = 显式上限 |
 | When full | Keep what is shown | 或 Replace the oldest |
 | Ignore clips shorter than | 1s | 0.5–3s，见 §6.5 |
 | Shared time scale | on | 关掉则每条独立缩放 |
@@ -959,7 +988,8 @@ Firefox 140+ 起，AMO 强制要求：
   "enabled": true,                 // 全局开关，工具栏按钮控制
 
   "settings": {                    // 用户设置
-    "maxLanes": 4,
+    "v": 2,                        // schema 版本，用于默认值迁移（见 §6.2.1）
+    "maxLanes": 0,                 // 0 = 不限，硬顶 64
     "whenFull": "keep",            // "keep" | "replace"
     "sync": true,
     "gain": "auto",                // "auto" | 1 | 2 | 4 | 8
@@ -992,9 +1022,10 @@ Firefox 140+ 起，AMO 强制要求：
 |------|------|
 | **峰值而非原始采样** | 所有分析（裁剪、指纹、渲染）都跑在 2048/8192 个峰值上，不碰几百万个采样点。快几个数量级，精度对本用途完全够。 |
 | **裁剪是视图状态** | 不修改 buffer，所以可逆、零成本、不需要重解码。代价是每个消费点（渲染/播放/下载）都要自己做坐标换算。 |
-| **满了排队而不是丢弃** | 用户明确要求"不要直接丢弃"。代价是需要维护停车场和 `flushParked()`。 |
+| **默认不限条数** | 上限截断的音频在界面上完全不可见，比滚动一长串更糟。代价是内存随会话增长，靠 `LANE_HARD_MAX = 64` 和滚动兜住。 |
+| **满了排队而不是丢弃** | 用户显式设了上限时才会发生。用户明确要求"不要直接丢弃"。代价是需要维护停车场和 `flushParked()`。 |
 | **全局统一增益** | 保住了响度的可比性，代价是特别小声的那条可能看不太清。 |
-| **一份 `content.js` 双模式** | 面板窗口和页内面板永不行为漂移。代价是文件大（1759 行），且到处要判 `IS_PANEL`。 |
+| **一份 `content.js` 双模式** | 面板窗口和页内面板永不行为漂移。代价是文件大（1781 行），且到处要判 `IS_PANEL`。 |
 | **`postMessage` 而非 `wrappedJSObject`** | 可移植。代价是数据必须可克隆，且必须当作不可信输入校验。 |
 | **不用外部库** | 包体 45KB，无供应链风险，商店审核简单。代价是 WAV 编码器、峰值计算、绘图全部手写。 |
 | **Shadow DOM + `!important`** | 页面 CSS 打不进来。代价是调试时得展开 shadow root。 |
@@ -1112,9 +1143,11 @@ npm i -D playwright && npx playwright install chromium
 node test/e2e.js
 ```
 
-22 项断言，覆盖：面板注入与版本号显示、Lane 区滚动、时长下限（默认 1s 下过滤 0.30s / 0.70s，调到 0.5s 后 0.70s 进来、0.30s 仍被挡，调到 2s 后已存在的 0.70s 轨被清掉）、设置项范围、设置底部的版本与仓库链接、grip 拖拽改面板尺寸并跨刷新持久化、超出高度的 Lane 会滚动、弹出窗口 → `⇲ Dock` → 页内面板回来的整条回路、以及全程零 JS 错误。
+27 项断言，覆盖：面板注入与版本号显示、Lane 区滚动、时长下限（默认 1s 下过滤 0.30s / 0.70s，调到 0.5s 后 0.70s 进来、0.30s 仍被挡，调到 2s 后已存在的 0.70s 轨被清掉）、设置项默认值与范围、设置底部的版本与仓库链接、grip 拖拽改面板尺寸并跨刷新持久化、**默认设置下 6 条音频全部成轨且列表在面板自身高度上滚动、队列为空**、老 profile 的 4 条上限被迁移掉、弹出窗口 → `⇲ Dock` → 页内面板回来的整条回路、以及全程零 JS 错误。
 
 v1.2.0 全部通过，AMO linter 0/0/0。
+
+**素材必须互不相同。** 第一版"6 条音频"的素材只改了频率，长度和包络一模一样——结果 6 条被 §7 的指纹合并成 1 条，看起来像上限没去掉。指纹只看 32 桶的相对响度加时长，听感上的音高差异它根本不看。
 
 ### 20.3 测试环境的三个硬约束
 
