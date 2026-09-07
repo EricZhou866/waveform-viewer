@@ -35,7 +35,7 @@ Nothing is uploaded anywhere. No accounts, no analytics, no remote code.
 **From source**
 
 ```bash
-git clone <repo> && cd waveform-viewer
+git clone https://github.com/EricZhou866/waveform-viewer.git && cd waveform-viewer
 ./build.sh          # writes dist/waveform-viewer-{chrome,firefox}-<ver>.zip
 ```
 

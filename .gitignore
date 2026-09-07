@@ -1,17 +1,6 @@
-# System files
-.DS_Store
-Thumbs.db
-
-# Dependency directories
-node_modules/
-target/
-vendor/
-
-# Build and log outputs
-dist/
+# build output
 build/
-*.log
+dist/
 
-# Environment and secrets
-.env
-.env.local
+# macOS
+.DS_Store

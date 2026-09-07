@@ -68,7 +68,7 @@ No accounts, no servers, no analytics, no tracking. Audio is decoded locally in
 your browser and nothing ever leaves your machine. The extension makes no network
 requests of its own beyond re-reading the audio files the page already loaded.
 
-Open source under the MIT license.
+Open source under the MIT license: https://github.com/EricZhou866/waveform-viewer
 
 ## Permission justifications (Chrome Web Store review form)
 
