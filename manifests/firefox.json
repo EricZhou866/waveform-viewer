@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Waveform Viewer — compare & measure audio",
-  "version": "1.1.5",
+  "version": "1.2.0",
   "description": "Draw waveforms for any audio on a page. Stack lanes, align onsets, play them together, measure gaps, download clips.",
   "author": "Eric Zhou",
   "homepage_url": "https://github.com/EricZhou866/waveform-viewer",

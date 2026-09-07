@@ -21,11 +21,19 @@ const DEFAULTS = {
   sync: true,           // one shared time scale across lanes
   gain: 'auto',         // 'auto' | 1 | 2 | 4 | 8
   trimOnAlign: true,    // Align also crops leading/trailing silence
-  trimThresh: 0.08      // silence threshold, fraction of the clip's own peak
+  trimThresh: 0.08,     // silence threshold, fraction of the clip's own peak
+  minDur: 1             // clips shorter than this many seconds are ignored
 };
 let cfg = Object.assign({}, DEFAULTS);
 const PEAK_RES  = 8192;
-const MIN_DUR   = 0.15;
+const MIN_DUR_LO = 0.5, MIN_DUR_HI = 3;
+/* Shortest clip worth a lane. User-settable because the right cut-off depends on
+   the site: players fire silent primers of a few ms, but ad stingers and UI blips
+   can run most of a second and are just as unwanted. */
+const minDur = () => Math.max(MIN_DUR_LO, Math.min(MIN_DUR_HI, Number(cfg.minDur) || DEFAULTS.minDur));
+
+const VERSION = (() => { try { return api.runtime.getManifest().version || ''; } catch (e) { return ''; } })();
+const REPO_URL = 'https://github.com/EricZhou866/waveform-viewer';
 
 const COLOR = {
   field:'#c9dcf7', fieldMute:'#aab4c6', wave:'#15171d', waveMute:'#6b7688',
@@ -38,6 +46,7 @@ let enabled = true;
 let host = null, shadow = null, lanesBox = null, statusEl = null;
 let audioCtx = null;
 let laneH = 96, panelW = 640;
+let panelH = 0;          // height of the scrolling lane area, in-page mode
 let gainVal = 1;
 /* Audio found while the panel was full. Nothing is thrown away: it waits here
    and slots in as soon as a lane frees up or the limit is raised. */
@@ -143,7 +152,7 @@ window.addEventListener('message', (e) => {
       maxs: Float32Array.from(d.maxs),
       duration: Number(d.duration) || 0
     };
-    if (!(peaks.duration >= MIN_DUR)) return;      // silent primer, ignore
+    if (!(peaks.duration >= minDur())) return;     // primer or blip, ignore
     const url = typeof d.url === 'string' ? d.url : '';
     if (url && isJunkSource(url)) return;
     offer({
@@ -191,7 +200,7 @@ function offerMedia(el) {
   }
   const url = srcOf(el);
   if (!url) return;
-  if (el.duration && el.duration < MIN_DUR) return;
+  if (el.duration && el.duration < minDur()) return;
   offer({ key: 'src:' + url, url, label: nameFromUrl(url), el });
 }
 
@@ -429,6 +438,7 @@ function ensurePanel() {
   document.body.appendChild(host);
 
   shadow = host.attachShadow({ mode: 'open' });
+  if (!panelH) panelH = Math.max(180, Math.round(((winOf().innerHeight || 800) * 0.58)));
   const PANEL_CSS = `
       * { box-sizing:border-box; margin:0; padding:0;
           font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif; }
@@ -438,6 +448,7 @@ function ensurePanel() {
       .bar { display:flex; align-items:center; gap:8px; padding:7px 10px;
         background:#232936; cursor:move; }
       .title { font-size:12.5px; font-weight:600; flex:1; }
+      .ver { font-size:10.5px; color:#7d8aa3; font-weight:400; }
       .count { font-size:11px; color:#93a2bd; font-weight:400; }
       .tools { display:flex; align-items:center; gap:5px; flex-wrap:wrap;
         padding:0 10px 8px; background:#232936; border-bottom:1px solid #39404e; }
@@ -447,7 +458,14 @@ function ensurePanel() {
       .btn:hover { background:#3d4860; color:#fff; }
       .btn.on { background:#3f6ea8; color:#fff; }
       .btn.play.on { background:#c2453f; }
-      .lanes { max-height:58vh; overflow-y:auto; }
+      /* The lane area always scrolls. Without this, lanes past the fourth end up
+         below the fold of a fixed-height panel and are simply invisible. */
+      .lanes { max-height:${panelH}px; overflow-y:auto; overscroll-behavior:contain;
+        scrollbar-width:thin; scrollbar-color:#4a556b #191d25; }
+      .lanes::-webkit-scrollbar { width:10px; }
+      .lanes::-webkit-scrollbar-track { background:#191d25; }
+      .lanes::-webkit-scrollbar-thumb { background:#4a556b; border-radius:5px; }
+      .lanes::-webkit-scrollbar-thumb:hover { background:#5c6982; }
       .lane { border-bottom:1px solid #2c3341; }
       .lane:last-child { border-bottom:0; }
       .lane.muted .name { color:#6f7c92; text-decoration:line-through; }
@@ -492,13 +510,17 @@ function ensurePanel() {
       .num, .pick { background:#2b3444; color:#e8edf6; border:1px solid #3d4658;
         border-radius:5px; font-size:11.5px; padding:3px 6px; }
       .row input[type=checkbox] { width:15px; height:15px; accent-color:#3f6ea8; cursor:pointer; }
+      .foot { margin-top:6px; padding:7px 12px 2px; border-top:1px solid #2c3341;
+        font-size:10.5px; color:#7d8aa3; }
+      .foot a { color:#7fc7f5; text-decoration:none; }
+      .foot a:hover { text-decoration:underline; }
       /* popped out: fill the whole window */
       .panel.popped { width:100%!important; height:100vh; border:0; border-radius:0;
         display:flex; flex-direction:column; box-shadow:none; }
       .panel.popped .bar, .panel.popped .tools { flex:0 0 auto; }
       .panel.popped .status { flex:0 0 auto; }
       .panel.popped .bar { cursor:default; }
-      .panel.popped .lanes { max-height:none; flex:1 1 auto; }
+      .panel.popped .lanes { max-height:none; flex:1 1 auto; min-height:0; }
       .panel.popped .grip, .panel.popped [data-act="fold"] { display:none; }
     `;
 
@@ -521,6 +543,7 @@ function ensurePanel() {
 
   const bar = mk('div', { className: 'bar' });
   const title = mk('span', { className: 'title', textContent: 'Waveform ' });
+  if (VERSION) title.appendChild(mk('span', { className: 'ver', textContent: 'v' + VERSION + ' ' }));
   const count = mk('span', { className: 'count' });
   title.appendChild(count);
   bar.appendChild(title);
@@ -538,6 +561,7 @@ function ensurePanel() {
     tools.appendChild(mk('button', { className: 'btn', textContent: '－', title: 'Shorter lanes', dataset: { act: 'shorter' } }));
     tools.appendChild(mk('span', { className: 'sep' }));
     tools.appendChild(mk('button', { className: 'btn', textContent: '⧉ Window', title: 'Open the panel in its own window — move it to a second monitor', dataset: { act: 'pop' } }));
+    tools.appendChild(mk('button', { className: 'btn', textContent: '⇲ Dock', title: 'Close this window and put the panel back into the page', dataset: { act: 'dock' } }));
     tools.appendChild(mk('button', { className: 'btn', textContent: 'Rescan', title: 'Scan the page again', dataset: { act: 'rescan' } }));
     tools.appendChild(mk('button', { className: 'btn', textContent: 'Clear', title: 'Remove all lanes', dataset: { act: 'clear' } }));
     tools.appendChild(mk('button', { className: 'btn', textContent: '\u2699', title: 'Settings', dataset: { act: 'settings' } }));
@@ -568,6 +592,7 @@ function ensurePanel() {
     else if (act === 'clear')    { stopAll(); parked.length = 0; [...lanes.keys()].forEach(dropLane); }
     else if (act === 'rescan')   { rescan(); }
     else if (act === 'pop')      { popOut(); }
+    else if (act === 'dock')     { dockBack(); }
     else if (act === 'files')    { pickFiles(); }
     else if (act === 'taller' || act === 'shorter') {
       laneH = Math.max(56, Math.min(240, laneH + (act === 'taller' ? 26 : -26)));
@@ -588,6 +613,8 @@ function ensurePanel() {
     fitPanelWindow();
     addEventListener('resize', fitPanelWindow);
   } else {
+    const dockBtn = shadow.querySelector('[data-act="dock"]');
+    if (dockBtn) dockBtn.remove();          // only the standalone window can dock
     makeDraggable(shadow.querySelector('.bar'));
     makeResizable(shadow.querySelector('.grip'));
     restoreGeometry();
@@ -601,7 +628,9 @@ function fitPanelWindow() {
   if (!shadow) return;
   panelW = innerWidth;
   const avail = Math.max(120, innerHeight - 34 - 40 - 26);
-  const n = Math.max(1, lanes.size);
+  // Past four lanes, stop shrinking and let the lane area scroll instead: thinner
+  // strips stop being readable long before they stop fitting.
+  const n = Math.max(1, Math.min(4, lanes.size));
   laneH = Math.max(56, Math.min(420, Math.floor(avail / n) - 34));
   shadow.querySelectorAll('canvas').forEach(c => { c.style.height = laneH + 'px'; });
   refreshAll();
@@ -670,6 +699,19 @@ function buildSettings(panel) {
   fullSel.addEventListener('change', () => { cfg.whenFull = fullSel.value; saveSettings(); });
   row('When full', fullSel, 'New audio is never discarded silently');
 
+  const minIn = mk('input', { type: 'number', className: 'num', min: String(MIN_DUR_LO),
+                              max: String(MIN_DUR_HI), step: '0.1' });
+  minIn.value = String(cfg.minDur);
+  minIn.addEventListener('change', () => {
+    const v = parseFloat(minIn.value);
+    cfg.minDur = isFinite(v) ? Math.max(MIN_DUR_LO, Math.min(MIN_DUR_HI, v)) : DEFAULTS.minDur;
+    minIn.value = String(cfg.minDur);
+    saveSettings();
+    applyMinDur();
+  });
+  row('Ignore clips shorter than', minIn,
+      'Seconds, ' + MIN_DUR_LO + '\u2013' + MIN_DUR_HI + '. Keeps jingles and the silent primers players fire out of the way');
+
   const syncCb = mk('input', { type: 'checkbox' });
   syncCb.checked = !!cfg.sync;
   syncCb.addEventListener('change', () => { cfg.sync = syncCb.checked; saveSettings(); refreshAll(); });
@@ -701,8 +743,34 @@ function buildSettings(panel) {
   thrSel.addEventListener('change', () => { cfg.trimThresh = Number(thrSel.value); saveSettings(); });
   row('Crop strength', thrSel, 'How loud counts as "not silence"');
 
+  const foot = mk('div', { className: 'foot' });
+  foot.appendChild(document.createTextNode('Waveform Viewer' + (VERSION ? ' v' + VERSION : '') + ' \u00b7 '));
+  foot.appendChild(mk('a', {
+    textContent: 'github.com/EricZhou866/waveform-viewer',
+    href: REPO_URL, target: '_blank', rel: 'noopener noreferrer'
+  }));
+  sheet.appendChild(foot);
+
   panel.appendChild(sheet);
   return sheet;
+}
+
+/* The cut-off changed: drop what no longer qualifies, and forget the sources
+   rejected under the old one so a lower cut-off can let them back in. */
+function applyMinDur() {
+  rejected.clear();
+  const m = minDur();
+  for (const [k, l] of [...lanes.entries()]) {
+    const d = l.duration || (l.el && l.el.duration) || 0;
+    if (d && d < m) dropLane(k);
+  }
+  for (let i = parked.length - 1; i >= 0; i--) {
+    const p = parked[i];
+    const d = p.duration || (p.peaks && p.peaks.duration) || 0;
+    if (d && d < m) parked.splice(i, 1);
+  }
+  flushParked();
+  refreshAll();
 }
 
 function toggleSettings() {
@@ -755,7 +823,10 @@ function paintStatus() {
 
 function applySize() {
   if (!shadow) return;
-  if (!IS_PANEL) shadow.querySelector('.panel').style.width = panelW + 'px';
+  if (!IS_PANEL) {
+    shadow.querySelector('.panel').style.width = panelW + 'px';
+    if (lanesBox) lanesBox.style.maxHeight = panelH + 'px';
+  }
   shadow.querySelectorAll('canvas').forEach(c => { c.style.height = laneH + 'px'; });
   refreshAll();
   saveGeometry();
@@ -884,6 +955,18 @@ async function popOut() {
   }
 }
 
+/* The way back: the standalone window hands control to the in-page panel again.
+ * The background owns the window, so it closes it and tells the tab to show its
+ * panel — window.close() on its own would leave that bookkeeping untouched and
+ * the page would keep hiding its panel. Still used as a fallback. */
+async function dockBack() {
+  try {
+    const r = await api.runtime.sendMessage({ type: 'wf:dockPanel' });
+    if (r && r.ok) return;
+  } catch (e) {}
+  try { window.close(); } catch (e) {}
+}
+
 /* Keep an open panel window in step with what the tab discovers. */
 function broadcastLane(lane) {
   if (IS_PANEL || !lane.peaks) return;
@@ -934,8 +1017,9 @@ async function addBytes(key, label, buf, mime) {
   let audio;
   try { audio = await actx().decodeAudioData(buf.slice(0)); }
   catch (e) { note('Cannot decode ' + label + ' — unsupported codec'); return; }
-  if (!audio || audio.duration < MIN_DUR) {
-    note(label + ' is too short to show (' + (audio ? audio.duration.toFixed(2) : '0') + 's)');
+  if (!audio || audio.duration < minDur()) {
+    note(label + ' is shorter than the ' + minDur() + 's minimum (' +
+         (audio ? audio.duration.toFixed(2) : '0') + 's) \u2014 change it in Settings');
     return;
   }
   const peaks = computePeaks(audio);
@@ -978,12 +1062,16 @@ function makeDraggable(handle) {
   });
 }
 
+/* The grip sizes the panel itself. Lane height has its own control (＋/－), so
+   dragging the corner changes how much of the stack is on screen at once — past
+   that the lane area scrolls. */
 function makeResizable(grip) {
   grip.addEventListener('mousedown', (e) => {
-    const sx = e.clientX, sy = e.clientY, sw = panelW, sh = laneH;
+    const sx = e.clientX, sy = e.clientY, sw = panelW, sh = panelH;
     const mv = (ev) => {
+      const vh = winOf().innerHeight || 900;
       panelW = Math.max(340, Math.min(1500, sw + (ev.clientX - sx)));
-      laneH = Math.max(56, Math.min(240, sh + (ev.clientY - sy)));
+      panelH = Math.max(120, Math.min(Math.max(160, vh - 140), sh + (ev.clientY - sy)));
       applySize();
     };
     const up = () => { winOf().removeEventListener('mousemove', mv); winOf().removeEventListener('mouseup', up); };
@@ -996,7 +1084,7 @@ function saveGeometry() {
   if (IS_PANEL) return;
   try {
     const r = host.getBoundingClientRect();
-    api.storage.local.set({ geom: { left: r.left, top: r.top, w: panelW, h: laneH } });
+    api.storage.local.set({ geom: { left: r.left, top: r.top, w: panelW, h: laneH, ph: panelH } });
   } catch (e) {}
 }
 
@@ -1004,7 +1092,7 @@ function restoreGeometry() {
   try {
     api.storage.local.get('geom').then(({ geom }) => {
       if (!geom) return;
-      panelW = geom.w || panelW; laneH = geom.h || laneH;
+      panelW = geom.w || panelW; laneH = geom.h || laneH; panelH = geom.ph || panelH;
       if (geom.left != null && geom.left < winOf().innerWidth - 60 && geom.top < winOf().innerHeight - 40) {
         host.style.setProperty('left', geom.left + 'px', 'important');
         host.style.setProperty('top', geom.top + 'px', 'important');
@@ -1310,7 +1398,7 @@ async function loadPeaks(lane) {
 
   // Too short to be real content (silent primers decode to a few milliseconds).
   // Remember the source so we do not keep fetching and decoding it.
-  if (!audio || audio.duration < MIN_DUR) {
+  if (!audio || audio.duration < minDur()) {
     rejected.add(url);
     dropLane(lane.key);
     return;

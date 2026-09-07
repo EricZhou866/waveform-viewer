@@ -54,10 +54,11 @@ The panel appears in the bottom-right as soon as audio is detected.
 | `▶ Play` | Play every un-muted lane together on one playhead. Stops and rewinds to the start when the longest lane finishes. `Ctrl/⌘ + Space` |
 | `⇱ Align` | **Crop the silence off both ends of every clip** and start them together. Click again to restore the full clips |
 | `↔ Shift` | Drag a lane sideways to align by hand (hold **Shift** to toggle temporarily). The ruler stays put; the waveform slides |
-| `＋` / `－` | Lane height |
+| `＋` / `－` | Lane height. Drag the grip at the bottom-right corner to resize the panel itself — width, and how many lanes are on screen before the list scrolls |
 | `⚙` | Settings |
 | `⊕ Files` | Open audio files from your computer (or just drag them onto the panel) |
 | `⧉ Window` | Open the panel as its own browser window — drag it to a second monitor. The in-page panel steps aside while it is open |
+| `⇲ Dock` | *(in the standalone window)* Close it and put the panel back into the page |
 | `Rescan` | Scan the page again and ask it to re-announce the audio it has already loaded — use this if you closed a lane and the site replays without a fresh request |
 | `Clear` | Remove all lanes |
 
@@ -77,6 +78,7 @@ The panel appears in the bottom-right as soon as audio is detected.
 | Setting | Default | What it does |
 |---|---|---|
 | Max lanes | 4 | How many waveforms fit on screen (1–8) |
+| Ignore clips shorter than | 1 s | Anything shorter never gets a lane (0.5–3 s). Players fire silent primers before playback, and sites throw in UI blips and ad stingers; without a floor those crowd out what you are actually comparing. Lower it if you are working with very short clips — lanes already on screen are re-checked as soon as you change it |
 | When full | Keep what is shown | New audio is **parked, never discarded** — it slots in as soon as you close a lane or raise the limit. Switch to "Replace the oldest" for the old behaviour |
 | Shared time scale | on | Lanes use one ruler so they line up vertically |
 | Vertical zoom | Auto | Same factor for every lane, so loudness stays comparable |
@@ -103,9 +105,14 @@ available space.
 The window is a normal extension window, not a popup owned by the tab, so it
 survives navigating away and can be left open across practice sessions. Only one
 panel is ever visible: the in-page panel hides while the window is open and comes
-back when you close it. Lanes the tab finds afterwards are pushed across
-automatically, and you can open more files directly in the window with `⊕ Files`
-or by dropping them in.
+back when you close it — or when you press `⇲ Dock` inside the window, which does
+the same thing without hunting for the close button. Lanes the tab finds afterwards
+are pushed across automatically, and you can open more files directly in the window
+with `⊕ Files` or by dropping them in. Note that the hand-over is one-way: files you
+opened *in the window* do not travel back to the page when you dock.
+
+More lanes than fit on screen scroll inside the panel rather than disappearing below
+its bottom edge, in both the in-page panel and the window.
 
 Audio the page holds as a `blob:` URL cannot be fetched from an extension page, so
 those clips travel to the window as bytes instead — you get the waveform either way.
@@ -144,10 +151,12 @@ media elements 2 · decoded 1 · audio requests 3 · page hook active
 - **A lane you closed does not come back on replay** — hit `Rescan`. Some players
   replay from memory without touching the network, so there is nothing for the
   detector to see.
-- Clips shorter than 0.15 s are ignored. Many players fire a silent `data:`
-  primer before every playback to unlock the audio context; those would otherwise
-  pile up as empty 0.00 s lanes. A source that turns out not to be usable audio is
-  remembered and not fetched again.
+- **A clip you wanted never shows up** — it may be shorter than the minimum length
+  (Settings ▸ *Ignore clips shorter than*, 1 s by default). Lower it and play the
+  audio again. The floor exists because many players fire a silent `data:` primer
+  before every playback to unlock the audio context, and those would otherwise pile
+  up as empty lanes. A source that turns out not to be usable audio is remembered
+  and not fetched again.
 - **A lane shows ⚠** — the audio bytes could not be read; the message says why.
   Media Source Extensions (adaptive streams) and DRM-protected audio cannot be read.
 
@@ -176,8 +185,14 @@ manifests/
   firefox-mv3.json  MV3 alternative
 build.sh          copies src/ + the right manifest into build/, zips into dist/
 store/            listing copy, privacy policy, reviewer notes, screenshots
-test/             manual test pages
+test/             manual test pages, plus e2e.js — the regression run against
+                  the built extension (node test/e2e.js, see DESIGN.md §20)
 ```
+
+## Design
+
+[DESIGN.md](DESIGN.md) documents the architecture, the algorithms, and an archive of
+the bugs that shaped them. Read it before changing anything here.
 
 ## License
 

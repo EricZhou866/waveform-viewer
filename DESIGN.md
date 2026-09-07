@@ -1,6 +1,6 @@
 # Waveform Viewer — 设计文档
 
-> 版本 1.1.5 · 对应源码 `src/content.js` (1671 行) / `src/page-hook.js` (235 行) / `src/background.js` (236 行)
+> 版本 1.2.0 · 对应源码 `src/content.js` (1759 行) / `src/page-hook.js` (235 行) / `src/background.js` (246 行)
 > 仓库 <https://github.com/EricZhou866/waveform-viewer> · MIT
 
 ---
@@ -128,9 +128,9 @@ const IS_PANEL = /-extension:$/.test(location.protocol);
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `src/content.js` | 1671 | 面板 UI、Lane 管理、时间轴、裁剪、播放、渲染、下载、设置 |
+| `src/content.js` | 1759 | 面板 UI、Lane 管理、时间轴、裁剪、播放、渲染、下载、设置 |
 | `src/page-hook.js` | 235 | 页面世界劫持，4 条发现路径 + 1 条补扫 |
-| `src/background.js` | 236 | 工具栏开关、CORS 代理、独立窗口所有权 |
+| `src/background.js` | 246 | 工具栏开关、CORS 代理、独立窗口所有权 |
 | `src/panel.html` | 13 | 独立窗口的空壳，只负责加载 `content.js` |
 | `manifests/*.json` | — | 三份 manifest，构建时择一 |
 
@@ -227,6 +227,7 @@ hook 注入时页面可能已经加载过音频了。用 `performance.getEntries
 | `wf:fetch` | CS → BG | CORS 代理下载，返回 base64 |
 | `wf:openPanel` | CS → BG | 开独立窗口，带 Lane 描述符 |
 | `wf:getPanelData` | Panel → BG | 面板窗口启动时索取 Lane |
+| `wf:dockPanel` | Panel → BG | 关掉独立窗口，把面板交还给页面 |
 | `wf:panelLane` | CS → BG | 新发现的 Lane，转发给窗口 |
 | `wf:collectLanes` | BG → CS | 向标签页要当前**活的** Lane 列表 |
 | `wf:enabled` | BG → CS | 广播开关变化 |
@@ -311,9 +312,28 @@ function isJunkSource(url) {
 }
 ```
 
-外加 ② 解码后检查 `audio.duration < MIN_DUR (0.15s)` → `rejected.add(url)` + `dropLane()`。
+外加 ② 时长下限检查 → `rejected.add(url)` + `dropLane()`。
 
 `rejected` 这个 Set 是必需的：没有它，同一个坏源会在每次播放时被重新 fetch + 重新解码，白烧 CPU。
+
+### 6.5 时长下限是可配的（v1.2.0）
+
+下限从写死的 `0.15s` 改成设置项 `minDur`，**范围 0.5–3 秒，默认 1 秒**：
+
+```js
+const MIN_DUR_LO = 0.5, MIN_DUR_HI = 3;
+const minDur = () => Math.max(MIN_DUR_LO, Math.min(MIN_DUR_HI, Number(cfg.minDur) || DEFAULTS.minDur));
+```
+
+0.15s 只挡得住毫秒级的静音 primer。真正碍事的是**够长、但不是内容**的东西：UI 音效、页面切换的提示音、广告片头的一声 sting，这些常常有半秒到一秒，会挤掉用户正在对比的轨。下限该多少取决于站点，所以交给用户。
+
+四个检查点统一走 `minDur()`：hook 的 `decoded` 事件、媒体元素的 `duration`、`addBytes()`（本地文件与字节移交）、`loadPeaks()` 解码后。
+
+改动这个值时 `applyMinDur()` 立即生效：
+- 已不合格的 Lane 直接 `dropLane()`，停车场里不合格的条目一起清掉；
+- **`rejected.clear()`** —— 调低下限必须让之前被拒的源有机会回来，否则那个 Set 会把设置变成单向的。
+
+注意：清空 `rejected` 只是解除封禁，不会自动把音频找回来——那些源从未成为 Lane，要重新播放或 `Rescan` 才会再次被发现。
 
 ---
 
@@ -582,7 +602,39 @@ Auto 模式取**所有 Lane 的全局峰值**算一个统一系数，让最响�
 
 关键是**全局统一**：如果每条 Lane 各自归一化，两条响度差很多的录音会被画成一样高，音量差异这个重要信息就丢了。统一系数保证纵向可比。
 
-### 11.5 刻度
+### 11.5 面板尺寸与滚动（v1.2.0）
+
+**Lane 区永远可滚。** 这条是硬约束：Lane 数超过面板高度能放下的数量时，多出来的必须能滚到，而不是掉到面板下沿之外看不见。
+
+```css
+.lanes { max-height:${panelH}px; overflow-y:auto; overscroll-behavior:contain;
+         scrollbar-width:thin; scrollbar-color:#4a556b #191d25; }
+.panel.popped .lanes { max-height:none; flex:1 1 auto; min-height:0; }
+```
+
+三个容易漏的点：
+
+1. **`min-height:0`**。popped 模式下 `.lanes` 是 flex 子项，`flex:1 1 auto` 的默认 `min-height:auto` **不允许它收缩到内容高度以下**，于是内容会顶破面板而不是滚动。加了 `min-height:0` 才真的产生滚动条。
+2. **滚动条要看得见**。默认滚动条在 `#1b1f28` 这种深色上几乎是隐形的，用户会以为"轨没了"。显式给了 `scrollbar-color` 和 `::-webkit-scrollbar` 两套样式。
+3. **`fitPanelWindow()` 最多按 4 条分高度**：
+
+```js
+const n = Math.max(1, Math.min(4, lanes.size));
+laneH = Math.max(56, Math.min(420, Math.floor(avail / n) - 34));
+```
+
+窗口高度除以 Lane 数，Lane 一多每条就薄成一条线——比看不见好不了多少。超过 4 条就不再压缩，改为滚动。
+
+**页内面板的尺寸由用户定。** `panelH`（Lane 区高度）是独立于 `laneH`（单条波形高度）的状态：
+
+| 控件 | 改的是 |
+|------|--------|
+| `＋ / －` | `laneH` —— 单条波形画多高 |
+| 右下角 grip 拖拽 | `panelW` + `panelH` —— 面板本身多大，即一屏能看到几条 |
+
+v1.1.5 的 grip 拖的是 `laneH`，和 `＋/－` 重复，而面板高度写死 `58vh` 没法调。现在两者分开，`panelH` 一起进 `geom` 持久化（`{ left, top, w, h, ph }`），下次打开还是这个尺寸。
+
+### 11.6 刻度
 
 ```js
 const cands = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
@@ -608,6 +660,7 @@ const minor = major / 5;
 | `⊕ Files` | 打开本地文件 | 也支持拖拽到面板 |
 | `＋ / －` | 调 Lane 高度 | 仅页内模式 |
 | `⧉ Window` | 弹出到独立窗口 | 仅页内模式 |
+| `⇲ Dock` | 关掉独立窗口，回到页内面板 | 仅面板窗口模式 |
 | `Rescan` | 重扫 DOM + 请求 hook 重播 | 仅页内模式 |
 | `Clear` | 清空全部（含停车场） | |
 | `⚙` | 设置面板 | |
@@ -657,12 +710,15 @@ if (/INPUT|TEXTAREA|SELECT/.test(tag) || e.target.isContentEditable) return;
 |----|------|------|
 | Max lanes | 4 | 1–8 |
 | When full | Keep what is shown | 或 Replace the oldest |
+| Ignore clips shorter than | 1s | 0.5–3s，见 §6.5 |
 | Shared time scale | on | 关掉则每条独立缩放 |
 | Vertical zoom | Auto | 或 ×1 / ×2 / ×4 / ×8 |
 | Align crops silence | on | 关掉则 Align 退化为起音点平移 |
 | Crop strength | Normal (0.08) | Gentle 0.04 / Aggressive 0.15 |
 
 设置改动立即 `saveSettings()` 写 storage，不需要"保存"按钮。
+
+设置面板底部有一行版本号和仓库链接（`v1.2.0 · github.com/EricZhou866/waveform-viewer`），版本号同时显示在标题栏。用户报问题时第一句永远是"我这版是多少"，这一行省掉一轮来回；版本号取 `api.runtime.getManifest().version`，不写死。
 
 ### 12.6 样式隔离
 
@@ -751,6 +807,26 @@ async function openPanel(lanes, tabId) {
 ### 13.5 只有一个面板
 
 窗口开着的时候，页内面板 `display: none`；窗口关掉（`windows.onRemoved`）时广播 `wf:panelClosed`，页内面板回来。
+
+### 13.6 回程：`⇲ Dock`（v1.2.0）
+
+出去容易回来难——v1.1.5 只能靠用户自己关掉那个窗口。现在面板窗口里有 `⇲ Dock`：
+
+```js
+async function dockBack() {
+  try {
+    const r = await api.runtime.sendMessage({ type: 'wf:dockPanel' });
+    if (r && r.ok) return;
+  } catch (e) {}
+  try { window.close(); } catch (e) {}   // 兜底
+}
+```
+
+**为什么不直接 `window.close()`？** 窗口的所有权在后台（`panelWindowId` / `panelTabId`），页内面板要靠 `wf:panelClosed` 广播才会回来。让后台来关，这套记账才是一致的；`window.close()` 只作为消息通道出问题时的兜底。
+
+后台侧要注意 `closePanelWindow()` 的顺序陷阱——见 [§19.13](#1913-dock-回去以后页内面板不出现)。
+
+**移交是单向的**：窗口里用 `⊕ Files` 打开的音频不会跟着回到页面。页内面板一直保留着自己那份 Lane（只是被隐藏），Dock 回去看到的就是它们。
 
 ---
 
@@ -888,7 +964,8 @@ Firefox 140+ 起，AMO 强制要求：
     "sync": true,
     "gain": "auto",                // "auto" | 1 | 2 | 4 | 8
     "trimOnAlign": true,
-    "trimThresh": 0.08             // 0.04 | 0.08 | 0.15
+    "trimThresh": 0.08,            // 0.04 | 0.08 | 0.15
+    "minDur": 1                    // 0.5–3，短于此的片段直接忽略
   },
 
   "panelLanes": [                  // 独立窗口的载荷快照（回退用）
@@ -898,7 +975,12 @@ Firefox 140+ 起，AMO 强制要求：
 }
 ```
 
-外加面板几何信息（页内模式的位置和尺寸），由 `saveGeometry()` / `restoreGeometry()` 维护。
+外加 `geom` 键保存页内面板的几何信息，由 `saveGeometry()` / `restoreGeometry()` 维护：
+
+```jsonc
+{ "left": 320, "top": 180, "w": 640, "h": 96, "ph": 460 }
+//                          panelW    laneH   panelH（Lane 区高度，见 §11.5）
+```
 
 关掉扩展时 `panelLanes` 会被清空——"off 必须不留任何东西"。
 
@@ -912,7 +994,7 @@ Firefox 140+ 起，AMO 强制要求：
 | **裁剪是视图状态** | 不修改 buffer，所以可逆、零成本、不需要重解码。代价是每个消费点（渲染/播放/下载）都要自己做坐标换算。 |
 | **满了排队而不是丢弃** | 用户明确要求"不要直接丢弃"。代价是需要维护停车场和 `flushParked()`。 |
 | **全局统一增益** | 保住了响度的可比性，代价是特别小声的那条可能看不太清。 |
-| **一份 `content.js` 双模式** | 面板窗口和页内面板永不行为漂移。代价是文件大（1671 行），且到处要判 `IS_PANEL`。 |
+| **一份 `content.js` 双模式** | 面板窗口和页内面板永不行为漂移。代价是文件大（1759 行），且到处要判 `IS_PANEL`。 |
 | **`postMessage` 而非 `wrappedJSObject`** | 可移植。代价是数据必须可克隆，且必须当作不可信输入校验。 |
 | **不用外部库** | 包体 45KB，无供应链风险，商店审核简单。代价是 WAV 编码器、峰值计算、绘图全部手写。 |
 | **Shadow DOM + `!important`** | 页面 CSS 打不进来。代价是调试时得展开 shadow root。 |
@@ -990,6 +1072,22 @@ Firefox 140+ 起，AMO 强制要求：
 **原因**：CSS 类名撞车——设置里的 `<select class="sel">` 撞上了 Lane 头部选区读数的 `.sel`。
 **修法**：设置里的改名 `.pick`。
 
+### 19.13 Dock 回去以后页内面板不出现
+
+**现象**：在面板窗口里点 `⇲ Dock`，窗口确实关了，但页内面板还是隐藏的，整个扩展看上去像没了。
+**原因**：`closePanelWindow()` 里的顺序——
+
+```js
+const id = panelWindowId;
+panelWindowId = null;        // 先清
+await api.windows.remove(id);
+```
+
+先清空 `panelWindowId` 再 `remove()`，于是 `windows.onRemoved` 回调里的 `if (id !== panelWindowId) return;` 直接返回（此时它是 `null`），**那句 `wf:panelClosed` 广播根本没发出去**。原来只有"关闭扩展"这一条路径走它，那条路径上页内面板本来就要销毁，所以没人发现。
+
+**修法**：`closePanelWindow(notify)` 加一个参数，需要通知的调用方显式要求广播。先清 `panelWindowId` 的写法保留——它保证 `onRemoved` 不会再广播一次，两边合起来正好一次。
+**教训**：给一个只有单一调用方的函数加第二个调用方时，要重读它对全局状态的所有副作用，而不是只看它的名字。
+
 ---
 
 ## 20. 测试策略
@@ -1006,27 +1104,33 @@ Firefox 140+ 起，AMO 强制要求：
 2. **再修**。
 3. **回归验证** — 跑全套。
 
-### 20.2 回归套件
+### 20.2 回归套件 `test/e2e.js`
 
-| 脚本 | 覆盖 |
-|------|------|
-| `regress.js` | 10 项基础检查 |
-| `n1.js` | Align / Shift / 设置持久化 |
-| `n2.js` | 容量上限与停车场队列 |
-| `t.js` | 裁剪正确性 + 播放结束行为 |
-| `v6.js` | 去重 / blob URL / 独立窗口 |
-| `v7.js` | 关闭开关时所有窗口退出 |
-| `fb.js` | 字节移交的回退路径 |
-| `repro2.js` / `rescan.js` | 重播恢复 |
-| `dp.js` / `dp2.js` | `data:` primer 过滤 |
+```bash
+./build.sh                                    # 必须先构建，跑的是 build/chrome
+npm i -D playwright && npx playwright install chromium
+node test/e2e.js
+```
 
-v1.1.5 全部通过，零 JS 错误，AMO linter 0/0/0。
+22 项断言，覆盖：面板注入与版本号显示、Lane 区滚动、时长下限（默认 1s 下过滤 0.30s / 0.70s，调到 0.5s 后 0.70s 进来、0.30s 仍被挡，调到 2s 后已存在的 0.70s 轨被清掉）、设置项范围、设置底部的版本与仓库链接、grip 拖拽改面板尺寸并跨刷新持久化、超出高度的 Lane 会滚动、弹出窗口 → `⇲ Dock` → 页内面板回来的整条回路、以及全程零 JS 错误。
 
-### 20.3 手工测试页
+v1.2.0 全部通过，AMO linter 0/0/0。
 
-`test/demo.html`（`<audio>` 元素）和 `test/real.html`（Web Audio 路径），用于人工回归。
+### 20.3 测试环境的三个硬约束
 
-### 20.4 测试环境自身的坑
+跑这套东西撞过三堵墙，每一堵都会让人误判成"扩展坏了"：
+
+1. **不能用系统装的 Chrome**。Chrome 137 起停用了 `--load-extension` 命令行开关，`--disable-features=DisableLoadExtensionCommandLineSwitch` 也救不回来（152 上实测无效）：扩展静默不加载，`chrome://extensions-internals` 里只有三个内置组件扩展。必须用 Playwright 自带的 Chromium。
+2. **Playwright 默认就带 `--disable-extensions`**。所以必须 `ignoreDefaultArgs: ['--disable-extensions', '--disable-component-extensions-with-background-pages']`，否则同样是静默不加载。另外扩展跑不了 headless shell，要 `channel: 'chromium'` + `headless: true`（新版 headless）。
+3. **没有 HTTP 服务器**。素材由 `ctx.route()` 在测试进程内直接 fulfill，页面仍然是真实的 `https://` 源（内容脚本要有源才会注入）。这样不占端口，也不依赖沙箱允许监听。
+
+还有一个非技术性的坑：**页内面板要等第一条 Lane 出现才会创建**（`ensurePanel()` 由 `createLane()` 调用）。断言面板存在之前必须先放音频，否则会得到一个"扩展没装上"的假象。
+
+### 20.4 手工测试页
+
+`test/demo.html`（`<audio>` 元素）和 `test/real.html`（Web Audio 路径），用于人工回归，需要自备 `ref.mp3` / `mine.mp3`。
+
+### 20.5 测试环境自身的坑
 
 有几次"bug"其实出在测试脚手架上，记下来避免误判：
 
@@ -1051,17 +1155,18 @@ src/ + manifests/<target>.json  →  build/<target>/  →  dist/*.zip
 | `waveform-viewer-chrome-<ver>.zip` | Chrome Web Store 提交 |
 | `waveform-viewer-firefox-<ver>.zip` | AMO 提交（MV2） |
 | `waveform-viewer-source-<ver>.zip` | AMO 要求的可复现构建源码（只含 `src` `manifests` `build.sh` `README.md` `LICENSE`） |
-| `waveform-viewer-repo-<ver>.zip` | 完整仓库快照，用于同步工作副本 |
 
-`firefox-mv3` 作为可选参数构建 MV3 变体。
+`firefox-mv3` 作为可选参数构建 MV3 变体（第四个产物）。
+
+`build.sh` 开头是 `rm -rf build dist`：产物目录永远只对应当前版本，不会留下上一版的 zip 让人拿错文件去提交。
 
 版本号从 `manifests/chrome.json` 读，是唯一真实来源；发版时三份 manifest 一起改。
 
 ### 21.2 发布前检查
 
-1. 三份 manifest 版本号一致
+1. 三份 manifest 版本号一致（`manifests/chrome.json` 是唯一真实来源）
 2. `npx addons-linter dist/waveform-viewer-firefox-<ver>.zip` → 0/0/0
-3. 跑完整回归套件
+3. `node test/e2e.js` 全绿
 4. 在两个浏览器里手工装一遍，过一遍 `test/real.html`
 
 ### 21.3 商店素材
@@ -1087,4 +1192,4 @@ src/ + manifests/<target>.json  →  build/<target>/  →  dist/*.zip
 
 ---
 
-*文档对应 v1.1.5。修改代码时请同步更新本文档中受影响的小节。*
+*文档对应 v1.2.0。修改代码时请同步更新本文档中受影响的小节（含 §3.2 的行数表与本行的版本号）。*

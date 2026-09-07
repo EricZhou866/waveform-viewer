@@ -74,11 +74,15 @@ async function broadcastTabs(msg) {
   } catch (e) {}
 }
 
-async function closePanelWindow() {
+/* Clearing panelWindowId before the remove() means onRemoved sees a window it no
+   longer owns and stays quiet, so callers that want the tabs told say so. */
+async function closePanelWindow(notify) {
   const id = panelWindowId;
   panelWindowId = null;
+  panelTabId = null;
   if (id === null) return;
   try { await api.windows.remove(id); } catch (e) {}
+  if (notify) await broadcastTabs({ type: 'wf:panelClosed' });
 }
 
 /* Rebuild the lane list from primitives before it touches storage. A value that
@@ -192,6 +196,12 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.type === 'wf:openPanel') {
     openPanel(msg.lanes, sender && sender.tab ? sender.tab.id : undefined).then(sendResponse);
+    return true;
+  }
+  if (msg.type === 'wf:dockPanel') {
+    // Back into the page: close the window, then hand the tab its panel back.
+    closePanelWindow(true).then(() => sendResponse({ ok: true }))
+                          .catch(() => sendResponse({ ok: false }));
     return true;
   }
   if (msg.type === 'wf:getPanelData') {
