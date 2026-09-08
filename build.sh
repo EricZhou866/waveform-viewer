@@ -26,8 +26,9 @@ if [ "${1:-}" = "firefox-mv3" ]; then
   pack firefox-mv3 manifests/firefox-mv3.json "waveform-viewer-firefox-mv3-$VER.zip"
 fi
 
-# Firefox reviewers ask for readable sources; ship the tree as-is.
-zip -qr "dist/waveform-viewer-source-$VER.zip" src manifests build.sh README.md LICENSE 2>/dev/null || \
-zip -qr "dist/waveform-viewer-source-$VER.zip" src manifests build.sh README.md
+# Firefox reviewers ask for readable sources; ship the tree as-is. test/ and
+# DESIGN.md are in here because the reviewer notes point at them.
+zip -qr "dist/waveform-viewer-source-$VER.zip" src manifests test build.sh README.md DESIGN.md LICENSE 2>/dev/null || \
+zip -qr "dist/waveform-viewer-source-$VER.zip" src manifests test build.sh README.md DESIGN.md
 echo "  dist/waveform-viewer-source-$VER.zip"
 echo "Done."

@@ -1274,7 +1274,7 @@ src/ + manifests/<target>.json  →  build/<target>/  →  dist/*.zip
 |------|------|
 | `waveform-viewer-chrome-<ver>.zip` | Chrome Web Store 提交 |
 | `waveform-viewer-firefox-<ver>.zip` | AMO 提交（MV2） |
-| `waveform-viewer-source-<ver>.zip` | AMO 要求的可复现构建源码（只含 `src` `manifests` `build.sh` `README.md` `LICENSE`） |
+| `waveform-viewer-source-<ver>.zip` | AMO 要求的可复现构建源码（`src` `manifests` `test` `build.sh` `README.md` `DESIGN.md` `LICENSE`）。`test/` 必须在里面——审核说明里写了"测试页在源码包的 test/ 下"，少了它那句话就是假的 |
 
 `firefox-mv3` 作为可选参数构建 MV3 变体（第四个产物）。
 
