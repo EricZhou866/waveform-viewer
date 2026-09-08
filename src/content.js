@@ -1830,7 +1830,15 @@ api.runtime.onMessage.addListener((msg) => {
       stopAll();
       [...lanes.keys()].forEach(dropLane);
       if (host) { host.remove(); host = null; shadow = null; lanesBox = null; statusEl = null; }
-    } else { ensurePanel(); scanDom(); }
+    } else {
+      /* Do NOT build a panel in every tab. The switch is global, but a panel
+         appearing in a tab the user was not even looking at is indistinguishable
+         from a bug — and it breaks the rule the rest of the file follows, that a
+         panel exists because a lane does. Only the tab whose toolbar button was
+         clicked gets one unasked, as the click's own feedback. */
+      if (msg.active) { ensurePanel(); paintStatus(); rescan(); }
+      scanDom();
+    }
   }
 });
 

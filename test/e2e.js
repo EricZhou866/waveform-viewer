@@ -53,6 +53,7 @@ const FILES = {
   ...Object.fromEntries([1, 2, 3, 4, 5, 6].map(i =>
     ['c' + i + '.mp3', wav([sil(0.1 * i), tone(0.8 + 0.21 * i, 200 + i * 90, 0.25 + 0.1 * i),
                             sil(0.15), tone(0.3, 300 + i * 40, 0.5 - 0.05 * i)])])),
+  'b.html': Buffer.from('<!doctype html><meta charset="utf-8"><title>quiet page</title><h3>no audio here</h3>'),
   't.html': Buffer.from(`<!doctype html><meta charset="utf-8"><title>web audio only</title>
 <h3>no &lt;audio&gt; element on this page</h3>
 <script>
@@ -300,6 +301,30 @@ const SR = `(() => { const h = document.getElementById('__wf_viewer_host'); retu
     ok('the in-page panel comes back after docking',
        (await page.evaluate(`getComputedStyle(document.getElementById('__wf_viewer_host')).display`)) === 'block');
   }
+
+  /* The switch is global, but the panel it creates must not be: a panel showing
+     up in a tab the user was not even looking at reads as a bug, and it breaks
+     the rule that a panel exists because a lane does. */
+  const pageB = await ctx.newPage();
+  await pageB.goto('https://wf.test/b.html');
+  await sleep(800);
+  const hasPanel = (p) => p.evaluate(`!!document.getElementById('__wf_viewer_host')`);
+  ok('a page with no audio starts with no panel', (await hasPanel(pageB)) === false);
+
+  const swT = ctx.serviceWorkers()[0];
+  const toggleFrom = (url) => swT.evaluate(`(async () => {
+      const [t] = await chrome.tabs.query({ url: ${JSON.stringify('https://wf.test/b.html')} });
+      return toggleEnabled(t);
+    })()`);
+  await toggleFrom(); await sleep(900);
+  ok('turning it off clears the panel everywhere',
+     (await hasPanel(page)) === false && (await hasPanel(pageB)) === false);
+
+  await toggleFrom(); await sleep(1400);
+  const onA = await hasPanel(page), onB = await hasPanel(pageB);
+  ok('turning it on gives a panel to the tab whose button was clicked', onB === true, { onA, onB });
+  ok('turning it on does NOT open a panel in another tab that has no audio', onA === false, { onA, onB });
+  await pageB.close();
 
   /* a profile carrying the old default cap of 4 is lifted on load */
   const sw = ctx.serviceWorkers()[0];

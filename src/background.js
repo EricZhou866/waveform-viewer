@@ -41,7 +41,10 @@ api.runtime.onInstalled.addListener(paintButton);
 api.runtime.onStartup && api.runtime.onStartup.addListener(paintButton);
 paintButton();
 
-async function toggleEnabled() {
+/* `tab` is the tab whose toolbar button was clicked. It is passed on so that
+   exactly one tab — the one the user is looking at — gets a panel out of the
+   click. Every other tab only re-scans. */
+async function toggleEnabled(tab) {
   const next = !(await isEnabled());
   await api.storage.local.set({ enabled: next });
   await paintButton();
@@ -51,7 +54,7 @@ async function toggleEnabled() {
     await closePanelWindow();
     try { await api.storage.local.set({ panelLanes: [] }); } catch (e) {}
   }
-  await broadcastTabs({ type: 'wf:enabled', enabled: next });
+  await broadcastTabs({ type: 'wf:enabled', enabled: next }, tab && tab.id);
   return next;
 }
 
@@ -65,11 +68,12 @@ action.onClicked.addListener(toggleEnabled);
 let panelWindowId = null;
 let panelTabId = null;   // the tab whose lanes the window mirrors
 
-async function broadcastTabs(msg) {
+async function broadcastTabs(msg, activeId) {
   try {
     const tabs = await api.tabs.query({});
     for (const t of tabs) {
-      try { await api.tabs.sendMessage(t.id, msg); } catch (e) { /* no content script */ }
+      const m = (activeId != null && t.id === activeId) ? Object.assign({}, msg, { active: true }) : msg;
+      try { await api.tabs.sendMessage(t.id, m); } catch (e) { /* no content script */ }
     }
   } catch (e) {}
 }
