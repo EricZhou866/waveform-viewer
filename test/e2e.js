@@ -53,6 +53,20 @@ const FILES = {
   ...Object.fromEntries([1, 2, 3, 4, 5, 6].map(i =>
     ['c' + i + '.mp3', wav([sil(0.1 * i), tone(0.8 + 0.21 * i, 200 + i * 90, 0.25 + 0.1 * i),
                             sil(0.15), tone(0.3, 300 + i * 40, 0.5 - 0.05 * i)])])),
+  // Decodes during parse — as early as a page realistically can, which is what
+  // makes it a fair test of "the switch is off, do not touch this page".
+  'auto.html': Buffer.from(`<!doctype html><meta charset="utf-8"><title>auto</title>
+<h3>decodes on load</h3>
+<script>
+window.playSet = async (list) => {
+  const ctx = new AudioContext();
+  for (const f of list) {
+    const a = await ctx.decodeAudioData(await (await fetch(f)).arrayBuffer());
+    const s = ctx.createBufferSource(); s.buffer = a;
+  }
+};
+window.playSet(['ref.mp3', 'mine.mp3']);
+</script>`),
   'b.html': Buffer.from('<!doctype html><meta charset="utf-8"><title>quiet page</title><h3>no audio here</h3>'),
   't.html': Buffer.from(`<!doctype html><meta charset="utf-8"><title>web audio only</title>
 <h3>no &lt;audio&gt; element on this page</h3>
@@ -316,6 +330,10 @@ const SR = `(() => { const h = document.getElementById('__wf_viewer_host'); retu
       const [t] = await chrome.tabs.query({ url: ${JSON.stringify('https://wf.test/b.html')} });
       return toggleEnabled(t);
     })()`);
+  const toggleAny = () => swT.evaluate(`(async () => {
+      const [t] = await chrome.tabs.query({});
+      return toggleEnabled(t);
+    })()`);
   await toggleFrom(); await sleep(900);
   ok('turning it off clears the panel everywhere',
      (await hasPanel(page)) === false && (await hasPanel(pageB)) === false);
@@ -325,6 +343,32 @@ const SR = `(() => { const h = document.getElementById('__wf_viewer_host'); retu
   ok('turning it on gives a panel to the tab whose button was clicked', onB === true, { onA, onB });
   ok('turning it on does NOT open a panel in another tab that has no audio', onA === false, { onA, onB });
   await pageB.close();
+
+  /* Switched off, a page opened afterwards must be left completely alone: no
+     panel, and none of the page's own globals patched. The content script only
+     learns the switch state asynchronously, so anything that acts on a default
+     of "on" acts before it knows. */
+  await toggleAny();                       // off
+  await sleep(800);
+  const pageC = await ctx.newPage();
+  await pageC.goto('https://wf.test/auto.html');
+  await sleep(3000);
+  const offState = await pageC.evaluate(`({
+    panel: !!document.getElementById('__wf_viewer_host'),
+    nativeDecode: /\\[native code\\]/.test((window.BaseAudioContext || window.AudioContext).prototype.decodeAudioData.toString()),
+    nativeFetch: /\\[native code\\]/.test(window.fetch.toString())
+  })`);
+  ok('switched off, a page that plays on load gets no panel', offState.panel === false, offState);
+  ok('switched off, the page-world hook is not installed at all',
+     offState.nativeDecode === true && offState.nativeFetch === true, offState);
+
+  await toggleAny();                       // back on
+  await sleep(1200);
+  await pageC.evaluate(`window.playSet(['ref.mp3'])`);
+  await sleep(2500);
+  ok('switching it back on injects the hook into a tab that never had it',
+     (await pageC.evaluate(`!!document.getElementById('__wf_viewer_host')`)) === true);
+  await pageC.close();
 
   /* a profile carrying the old default cap of 4 is lifted on load */
   const sw = ctx.serviceWorkers()[0];

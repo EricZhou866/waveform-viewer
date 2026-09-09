@@ -45,7 +45,12 @@ const COLOR = {
   selFill:'rgba(255,255,255,.30)', selEdge:'#f0f3f8'
 };
 
-let enabled = true;
+/* Unknown until the background answers, and "unknown" must behave as off. The
+   switch state only arrives asynchronously, so anything that acts on a default
+   of `true` is acting before it knows — which is how a panel used to appear on
+   a page while the extension was switched off. */
+let enabled = false;
+let hookInjected = false;
 let host = null, shadow = null, lanesBox = null, statusEl = null;
 let audioCtx = null;
 let laneH = 96, panelW = 640;
@@ -136,7 +141,16 @@ function b64ToBuf(b64) {
 }
 
 /* ============ inject the page-world hook ============ */
-(function inject() {
+/* Deliberately not run at load time. The hook patches the page's own fetch,
+   XMLHttpRequest, decodeAudioData and Audio; doing that on every page the user
+   visits while the extension is switched off would leave exactly the footprint
+   §16.2 promises there is none of. It costs the round trip to the background,
+   during which very early audio can be missed — that is what the Performance
+   backfill in the hook is for (§4.5). Idempotent, because turning the switch
+   back on has to inject into tabs that never got it. */
+function injectHook() {
+  if (hookInjected || IS_PANEL) return;
+  hookInjected = true;
   try {
     const s = document.createElement('script');
     s.src = api.runtime.getURL('page-hook.js');
@@ -144,7 +158,7 @@ function b64ToBuf(b64) {
     s.onerror = () => s.remove();
     (document.head || document.documentElement).appendChild(s);
   } catch (e) {}
-})();
+}
 
 /* The page-world hook talks to us over window.postMessage — the only channel
    that works on both Chrome and Firefox. Treat everything here as untrusted
@@ -1836,6 +1850,7 @@ api.runtime.onMessage.addListener((msg) => {
          from a bug — and it breaks the rule the rest of the file follows, that a
          panel exists because a lane does. Only the tab whose toolbar button was
          clicked gets one unasked, as the click's own feedback. */
+      injectHook();          // this tab may never have had the hook
       if (msg.active) { ensurePanel(); paintStatus(); rescan(); }
       scanDom();
     }
@@ -1843,12 +1858,17 @@ api.runtime.onMessage.addListener((msg) => {
 });
 
 loadSettings().then(() => {
-  if (IS_PANEL) { bootPanelWindow(); return; }
+  // The panel window only exists because the extension is on; it has no page to
+  // guard against and its own lanes go through offer().
+  if (IS_PANEL) { enabled = true; bootPanelWindow(); return; }
+  const settle = (on) => { enabled = on; if (on) { injectHook(); boot(); } };
   try {
     api.runtime.sendMessage({ type: 'wf:getEnabled' })
-      .then((r) => { enabled = !r || r.enabled !== false; if (enabled) boot(); })
-      .catch(() => boot());
-  } catch (e) { boot(); }
+      .then((r) => settle(!r || r.enabled !== false))
+      // Fail open: a background hiccup should leave the extension working, not
+      // silently dead. Only a definite "off" keeps it closed.
+      .catch(() => settle(true));
+  } catch (e) { settle(true); }
 });
 
 function boot() { scanDom(); [400, 1200, 3000].forEach(t => setTimeout(scanDom, t)); }
