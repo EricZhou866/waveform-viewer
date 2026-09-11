@@ -1345,9 +1345,19 @@ src/ + manifests/<target>.json  →  build/<target>/  →  dist/*.zip
 
 ### 21.3 商店素材
 
-`store/` 目录：`listing-en.md`（名称、简短描述、详细描述、权限说明）、`privacy-policy.md`、`reviewer-notes.md`、`screenshots/`。
+`store/` 目录：`listing-en.md`（名称、简短描述、详细描述、权限说明）、`privacy-policy.md`、`reviewer-notes.md`、`release-notes-<ver>.md`、`screenshots/`、`make-screenshots.js`。
 
 权限说明必须写清楚 `<all_urls>` 的两个理由（见 §16.1），这是审核最容易卡的地方。
+
+**截图是生成的，不是手工截的**：
+
+```bash
+./build.sh && node store/make-screenshots.js
+```
+
+和 `test/e2e.js` 同一套 Chromium 装载方式（为什么不能用系统 Chrome 见 §20.3），背景是 `test/demo.html` 这个谁也不模仿的模拟练习页，音频是现场合成的"语音形状"——纯音会画成一排方块，拿那个当商店图等于谎报这个工具画出来的东西长什么样。
+
+**界面一改就要重跑。** v1.4.0 把工具栏全换成图标之后，商店里挂的还是带文字标签的旧图——用户装上看到的和图片对不上，比没有图更糟。
 
 ---
 
