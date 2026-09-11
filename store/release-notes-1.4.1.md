@@ -1,8 +1,10 @@
-# AMO release notes — 1.4.0
+# AMO release notes — 1.4.1
 
 Paste the section below into the **Release Notes** field when submitting the
 version. 1.3.0 is the published version, so this covers everything since it.
-(1.3.1 and 1.3.2 were never submitted; their fixes are included here.)
+(1.3.1, 1.3.2 and 1.4.0 were never published; their changes are included here.
+1.4.0 is not reusable as a version number — AMO reserves a version string for
+good once it has been uploaded, even if the upload is deleted afterwards.)
 
 ---
 
