@@ -49,18 +49,27 @@ The panel appears in the bottom-right as soon as audio is detected.
 
 ### Toolbar
 
+The toolbar is icons only; hover any of them for what it does.
+
 | Button | What it does |
 |---|---|
-| `▶ Play` | Play every un-muted lane together on one playhead. Stops and rewinds to the start when the longest lane finishes. `Ctrl/⌘ + Space` |
-| `⇱ Align` | **On by default** — audio arrives already cropped to its sound and starting at zero. Click to restore the full clips; audio that arrives while it is off stays whole |
-| `↔ Shift` | Drag a lane sideways to align by hand (hold **Shift** to toggle temporarily). The ruler stays put; the waveform slides |
-| `＋` / `－` | Lane height. Drag any edge or corner of the panel to resize it — that sets how many lanes are on screen before the list scrolls |
+| `▶` | Play every un-muted lane together on one playhead. Stops and rewinds to the start when the longest lane finishes. `Ctrl/⌘ + Space` |
+| `⊕` | Open audio files from your computer (or just drag them onto the panel) |
+| `⊗` | Remove all lanes |
+| `⇤` | **On by default** — audio arrives already cropped to its sound and starting at zero. Click to restore the full clips; audio that arrives while it is off stays whole |
+| `↔` | *(hidden by default)* Drag a lane sideways to align by hand (hold **Shift** to toggle temporarily). The ruler stays put; the waveform slides |
+| `＋` / `－` | *(hidden by default)* Lane height. Drag any edge or corner of the panel to resize the panel itself — that sets how many lanes are on screen before the list scrolls |
+| `⧉` | Open the panel as its own browser window — drag it to a second monitor. The in-page panel steps aside while it is open |
+| `⇲` | *(in the standalone window)* Close it and put the panel back into the page |
+| `⟳` | *(hidden by default)* Scan the page again and ask it to re-announce the audio it has already loaded — use this if you closed a lane and the site replays without a fresh request |
 | `⚙` | Settings |
-| `⊕ Files` | Open audio files from your computer (or just drag them onto the panel) |
-| `⧉ Window` | Open the panel as its own browser window — drag it to a second monitor. The in-page panel steps aside while it is open |
-| `⇲ Dock` | *(in the standalone window)* Close it and put the panel back into the page |
-| `Rescan` | Scan the page again and ask it to re-announce the audio it has already loaded — use this if you closed a lane and the site replays without a fresh request |
-| `Clear` | Remove all lanes |
+
+Play, open and clear sit together at the front. The four marked *hidden by default*
+appear once you turn on **Show extra buttons** in Settings.
+
+On the title bar: `－` minimises the panel to a small bar that takes almost no
+space, and `✕` closes it on that page — clicking the extension's toolbar button
+brings it back.
 
 ### Per lane
 
@@ -70,7 +79,7 @@ The panel appears in the bottom-right as soon as audio is detected.
 | `+0.576s` | Current time offset; click to reset to zero |
 | `⬇` | Download: the selection as WAV, or the whole original file |
 | `◉` | Solo — mute every other lane |
-| `🔊 / 🔇` | Mute this lane |
+| `♫` | Mute this lane (struck through while muted) |
 | `✕` | Remove this lane |
 
 ### Settings (`⚙`)
@@ -80,6 +89,7 @@ The panel appears in the bottom-right as soon as audio is detected.
 | Max lanes | 0 — no limit | Every clip gets a lane and the list scrolls. Set a number (1–64) if you would rather cap it; past the cap, new audio waits in a queue instead of being thrown away |
 | Ignore clips shorter than | 2 s | Anything shorter never gets a lane (0.5–10 s). Players fire silent primers before playback, and sites throw in UI blips and ad stingers; without a floor those crowd out what you are actually comparing. Lower it if you are working with very short clips — lanes already on screen are re-checked as soon as you change it |
 | Align on arrival | on | New audio comes in cropped to its sound and starting at zero, with no click. Turn it off to see clips at full length |
+| Show extra buttons | off | Adds `↔`, `＋`, `－` and `⟳` to the toolbar |
 | When full | Keep what is shown | Only applies once you set a limit. New audio is **parked, never discarded** — it slots in as soon as you close a lane or raise the limit. Switch to "Replace the oldest" for the old behaviour |
 | Shared time scale | on | Lanes use one ruler so they line up vertically |
 | Vertical zoom | Auto | Same factor for every lane, so loudness stays comparable |

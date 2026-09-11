@@ -20,6 +20,7 @@ const DEFAULTS = {
   v: SETTINGS_V,
   maxLanes: 0,          // 0 = no cap: every clip gets a lane, and the list scrolls
   autoAlign: true,      // new audio arrives cropped and aligned
+  showExtra: false,     // Shift / lane height / Rescan are off the toolbar
   whenFull: 'keep',     // 'keep' = never discard silently | 'replace' = evict oldest
   sync: true,           // one shared time scale across lanes
   gain: 'auto',         // 'auto' | 1 | 2 | 4 | 8
@@ -79,6 +80,9 @@ const laneCap = () => {
    context. Remembered so they are not fetched and decoded over and over. */
 const rejected = new Set();
 let moveMode = false;
+/* The user closed the panel with ✕. Distinct from the global switch: the
+   extension keeps working, this page just stops showing a panel until asked. */
+let dismissed = false;
 /* Whether the panel is in the aligned state. Explicit rather than derived from
    "does any lane have a trim", because a lane arriving later has to know which
    state to join. Seeded from cfg.autoAlign, flipped by the Align button. */
@@ -257,7 +261,7 @@ function offerUrl(url) {
 }
 
 function offer(spec) {
-  if (!enabled) return;
+  if (!enabled || dismissed) return;
   if (spec.url && isJunkSource(spec.url)) return;
   const ex = lanes.get(spec.key);
   if (ex) {
@@ -361,7 +365,7 @@ function toggleAll() { T.playing ? stopAll(true) : playAll(); }
 function paintTransport() {
   if (!shadow) return;
   const b = shadow.querySelector('[data-act="play"]');
-  if (b) { b.textContent = T.playing ? '■ Stop' : '▶ Play'; b.classList.toggle('on', T.playing); }
+  if (b) { b.textContent = T.playing ? '\u25a0' : '\u25b6'; b.title = T.playing ? 'Stop' : 'Play every un-muted lane together'; b.classList.toggle('on', T.playing); }
 }
 
 function paintAllCursors() { for (const l of lanes.values()) paintCursor(l); }
@@ -498,19 +502,28 @@ function ensurePanel() {
       .panel { position:relative; width:${panelW}px; background:#1b1f28; color:#e8edf6;
         border:1px solid #39404e; border-radius:10px;
         box-shadow:0 10px 34px rgba(0,0,0,.45); overflow:hidden; user-select:none; }
-      .bar { display:flex; align-items:center; gap:8px; padding:7px 10px;
+      .bar { display:flex; align-items:center; gap:6px; padding:6px 8px;
         background:#232936; cursor:move; }
-      .title { font-size:12.5px; font-weight:600; flex:1; }
+      .logo { font-size:13px; color:#7fc7f5; line-height:1; }
+      .title { font-size:12.5px; font-weight:600; flex:1; white-space:nowrap; }
       .ver { font-size:10.5px; color:#7d8aa3; font-weight:400; }
       .count { font-size:11px; color:#93a2bd; font-weight:400; }
-      .tools { display:flex; align-items:center; gap:5px; flex-wrap:wrap;
-        padding:0 10px 8px; background:#232936; border-bottom:1px solid #39404e; }
-      .sep { width:1px; height:16px; background:#3d4658; margin:0 3px; }
-      .btn { background:#313a4c; border:0; color:#cfd9ea; border-radius:5px;
-        font-size:11.5px; padding:3px 8px; cursor:pointer; line-height:1.6; white-space:nowrap; }
-      .btn:hover { background:#3d4860; color:#fff; }
+      .tools { display:flex; align-items:center; gap:4px; flex-wrap:wrap;
+        padding:0 8px 7px; background:#232936; border-bottom:1px solid #39404e; }
+      .sep { width:1px; height:18px; background:#3d4658; margin:0 3px; }
+      /* Icon-only: the glyph carries the meaning, so it has to be big enough to
+         read at a glance, and the hit area big enough to aim at. */
+      .btn { background:#313a4c; border:0; color:#dbe4f3; border-radius:6px;
+        font-size:15px; line-height:1; padding:6px 9px; min-width:32px; cursor:pointer;
+        white-space:nowrap; display:inline-flex; align-items:center; justify-content:center; }
+      .btn:hover { background:#4a5872; color:#fff; }
       .btn.on { background:#3f6ea8; color:#fff; }
       .btn.play.on { background:#c2453f; }
+      .bar .btn { padding:4px 7px; min-width:26px; font-size:13px; }
+      /* Extra controls, hidden until Settings asks for them. */
+      .tools.lean [data-act="move"], .tools.lean [data-act="taller"],
+      .tools.lean [data-act="shorter"], .tools.lean [data-act="rescan"],
+      .tools.lean .sep.extra { display:none; }
       /* The lane area always scrolls. Without this, lanes past the fourth end up
          below the fold of a fixed-height panel and are simply invisible. */
       .lanes { max-height:${panelH}px; overflow-y:auto; overscroll-behavior:contain;
@@ -529,11 +542,13 @@ function ensurePanel() {
       .off:hover { color:#fff; }
       .meta { color:#8593ad; font-variant-numeric:tabular-nums; }
       .sel { color:#ffd479; font-variant-numeric:tabular-nums; font-weight:600; }
-      .ico { background:transparent; border:0; cursor:pointer; font-size:12.5px;
-        padding:0 3px; line-height:1; color:#8593ad; }
-      .ico:hover { color:#fff; }
+      /* Per-lane controls. These were 12.5px in #8593ad — too small to hit and
+         too close to the background to find without hunting for them. */
+      .ico { background:transparent; border:0; cursor:pointer; font-size:15px;
+        padding:3px 5px; line-height:1; border-radius:4px; color:#c4cfe2; }
+      .ico:hover { color:#fff; background:#3d4860; }
       .ico.on { color:#ffd479; }
-      .ico.off2 { color:#e5484d; }
+      .ico.off2 { color:#ff6b6f; text-decoration:line-through; }
       .wrap { position:relative; margin:0 9px 8px; cursor:text; }
       .wrap.move { cursor:grab; }
       .wrap.move:active { cursor:grabbing; }
@@ -566,6 +581,10 @@ function ensurePanel() {
       .grip::after { content:''; width:34px; height:3px; border-radius:2px; background:#4a556b; }
       .collapsed .lanes, .collapsed .grip, .collapsed .status, .collapsed .tools,
       .collapsed .sheet { display:none; }
+      /* Minimised: shrink to the buttons themselves. !important beats the inline
+         width applySize() writes. */
+      .panel.collapsed { width:auto!important; }
+      .panel.collapsed .title, .panel.collapsed .ver, .panel.collapsed .count { display:none; }
       .sheet { background:#191d25; border-top:1px solid #2c3341; padding:4px 0 8px; }
       .sheetHead { display:flex; align-items:center; justify-content:space-between;
         padding:8px 12px 6px; font-size:12px; font-weight:600; color:#dbe4f3; }
@@ -608,29 +627,39 @@ function ensurePanel() {
   const panel = mk('div', { className: 'panel' });
 
   const bar = mk('div', { className: 'bar' });
+  bar.appendChild(mk('span', { className: 'logo', textContent: '\u2307' }));
   const title = mk('span', { className: 'title', textContent: 'Waveform ' });
   if (VERSION) title.appendChild(mk('span', { className: 'ver', textContent: 'v' + VERSION + ' ' }));
   const count = mk('span', { className: 'count' });
   title.appendChild(count);
   bar.appendChild(title);
-  bar.appendChild(mk('button', { className: 'btn', textContent: '\uff0d', dataset: { act: 'fold' } }));
+  bar.appendChild(mk('button', { className: 'btn', textContent: '\uff0d', title: 'Minimise', dataset: { act: 'fold' } }));
+  bar.appendChild(mk('button', { className: 'btn', textContent: '\u2715', title: 'Close the panel on this page \u2014 the toolbar button brings it back', dataset: { act: 'hide' } }));
   panel.appendChild(bar);
 
   const tools = mk('div', { className: 'tools' });
-    tools.appendChild(mk('button', { className: 'btn play', textContent: '▶ Play', title: 'Play every un-muted lane together', dataset: { act: 'play' } }));
-    tools.appendChild(mk('button', { className: 'btn', textContent: '⇱ Align', title: 'Crop the silence at both ends of every clip and start them together. Click again to restore.', dataset: { act: 'align' } }));
-    tools.appendChild(mk('button', { className: 'btn', textContent: '↔ Shift', title: 'Drag the waveform sideways to shift a lane. Hold Shift to toggle temporarily.', dataset: { act: 'move' } }));
-    tools.appendChild(mk('span', { className: 'sep' }));
-    tools.appendChild(mk('button', { className: 'btn', textContent: '⊕ Files', title: 'Open audio files from this computer', dataset: { act: 'files' } }));
-    tools.appendChild(mk('span', { className: 'sep' }));
-    tools.appendChild(mk('button', { className: 'btn', textContent: '＋', title: 'Taller lanes', dataset: { act: 'taller' } }));
-    tools.appendChild(mk('button', { className: 'btn', textContent: '－', title: 'Shorter lanes', dataset: { act: 'shorter' } }));
-    tools.appendChild(mk('span', { className: 'sep' }));
-    tools.appendChild(mk('button', { className: 'btn', textContent: '⧉ Window', title: 'Open the panel in its own window — move it to a second monitor', dataset: { act: 'pop' } }));
-    tools.appendChild(mk('button', { className: 'btn', textContent: '⇲ Dock', title: 'Close this window and put the panel back into the page', dataset: { act: 'dock' } }));
-    tools.appendChild(mk('button', { className: 'btn', textContent: 'Rescan', title: 'Scan the page again', dataset: { act: 'rescan' } }));
-    tools.appendChild(mk('button', { className: 'btn', textContent: 'Clear', title: 'Remove all lanes', dataset: { act: 'clear' } }));
-    tools.appendChild(mk('button', { className: 'btn', textContent: '\u2699', title: 'Settings', dataset: { act: 'settings' } }));
+    /* Icons only, and the three things done most often sit together at the
+       front: play what is there, add a file, throw it all away. */
+    const tool = (icon, act, title, cls) =>
+      tools.appendChild(mk('button', { className: 'btn' + (cls ? ' ' + cls : ''),
+                                       textContent: icon, title: title, dataset: { act: act } }));
+    const gap = (extra) => tools.appendChild(mk('span', { className: 'sep' + (extra ? ' extra' : '') }));
+
+    tool('\u25b6', 'play', 'Play every un-muted lane together', 'play');
+    tool('\u2295', 'files', 'Open audio files from this computer');
+    tool('\u2297', 'clear', 'Remove all lanes');
+    gap();
+    tool('\u21e4', 'align', 'Crop the silence at both ends of every clip and start them together. Click again to restore.');
+    tool('\u2194', 'move', 'Drag the waveform sideways to shift a lane. Hold Shift to toggle temporarily.');
+    gap(true);
+    tool('\uff0b', 'taller', 'Taller lanes');
+    tool('\uff0d', 'shorter', 'Shorter lanes');
+    gap();
+    tool('\u29c9', 'pop', 'Open the panel in its own window \u2014 move it to a second monitor');
+    tool('\u21f2', 'dock', 'Close this window and put the panel back into the page');
+    tool('\u27f3', 'rescan', 'Scan the page again');
+    tool('\u2699', 'settings', 'Settings');
+    tools.classList.toggle('lean', !cfg.showExtra);
   panel.appendChild(tools);
 
   const lanesEl  = mk('div', { className: 'lanes' });
@@ -652,9 +681,11 @@ function ensurePanel() {
     if (!act) return;
     const panel = shadow.querySelector('.panel');
     if (act === 'fold') {
-      panel.classList.toggle('collapsed');
-      e.target.textContent = panel.classList.contains('collapsed') ? '＋' : '－';
-    } else if (act === 'play')   { toggleAll(); }
+      const folded = panel.classList.toggle('collapsed');
+      e.target.textContent = folded ? '\uff0b' : '\uff0d';
+      e.target.title = folded ? 'Restore' : 'Minimise';
+    } else if (act === 'hide')   { hidePanel(); }
+    else if (act === 'play')     { toggleAll(); }
     else if (act === 'align')    { alignOnsets(); }
     else if (act === 'move')     { moveMode = !moveMode; e.target.classList.toggle('on', moveMode); applyCursorMode(); }
     else if (act === 'clear')    { stopAll(); parked.length = 0; [...lanes.keys()].forEach(dropLane); }
@@ -674,7 +705,7 @@ function ensurePanel() {
 
   if (IS_PANEL) {
     panel.classList.add('popped');
-    ['pop', 'rescan', 'fold'].forEach(a => {
+    ['pop', 'rescan', 'fold', 'hide'].forEach(a => {
       const b = shadow.querySelector('[data-act="' + a + '"]');
       if (b) b.remove();
     });
@@ -691,6 +722,18 @@ function ensurePanel() {
   }
   paintAlignBtn();
   paintStatus();
+}
+
+/* ✕ on the title bar. Not the same as the global switch: the extension keeps
+   running everywhere else, this page just stops showing a panel. Lanes go with
+   it — a panel that is "closed" while still decoding audio in the background is
+   not closed. The toolbar button brings it back (that tab always gets a panel). */
+function hidePanel() {
+  dismissed = true;
+  stopAll(true);
+  parked.length = 0;
+  [...lanes.keys()].forEach(dropLane);
+  if (host) host.style.setProperty('display', 'none', 'important');
 }
 
 /* Standalone window: fill it, and split the height between the lanes. */
@@ -822,6 +865,16 @@ function buildSettings(panel) {
     saveSettings(); refreshAll();
   });
   row('Vertical zoom', gainSel, 'Same factor for every lane, so loudness stays comparable');
+
+  const extraCb = mk('input', { type: 'checkbox' });
+  extraCb.checked = !!cfg.showExtra;
+  extraCb.addEventListener('change', () => {
+    cfg.showExtra = extraCb.checked;
+    saveSettings();
+    const t = shadow && shadow.querySelector('.tools');
+    if (t) t.classList.toggle('lean', !cfg.showExtra);
+  });
+  row('Show extra buttons', extraCb, 'Shift, lane height (\uff0b\uff0d) and Rescan');
 
   const trimCb = mk('input', { type: 'checkbox' });
   trimCb.checked = !!cfg.trimOnAlign;
@@ -1279,7 +1332,7 @@ function createLane(spec) {
       <span class="meta"></span>
       <button class="ico" data-a="save" title="Download — selection as WAV, or the whole file">⬇</button>
       <button class="ico" data-a="solo" title="Solo — mute every other lane">◉</button>
-      <button class="ico" data-a="mute" title="Mute this lane">🔊</button>
+      <button class="ico" data-a="mute" title="Mute this lane">♫</button>
       <button class="ico" data-a="close" title="Remove this lane">✕</button>
     </div>
     <div class="wrap">
@@ -1354,7 +1407,7 @@ function setMute(lane, on) {
   lane.muted = on;
   lane.node.classList.toggle('muted', on);
   const b = lane.node.querySelector('[data-a="mute"]');
-  b.textContent = on ? '🔇' : '🔊';
+  b.textContent = '\u266b';          // struck through by .ico.off2 when muted
   b.classList.toggle('off2', on);
   redraw(lane);
   if (T.playing) playAll(T.pos);      // apply immediately
@@ -1851,7 +1904,13 @@ api.runtime.onMessage.addListener((msg) => {
          panel exists because a lane does. Only the tab whose toolbar button was
          clicked gets one unasked, as the click's own feedback. */
       injectHook();          // this tab may never have had the hook
-      if (msg.active) { ensurePanel(); paintStatus(); rescan(); }
+      if (msg.active) {
+        dismissed = false;   // an explicit click outranks an earlier ✕
+        ensurePanel();
+        if (host) host.style.setProperty('display', 'block', 'important');
+        paintStatus();
+        rescan();
+      }
       scanDom();
     }
   }
@@ -1910,7 +1969,7 @@ api.runtime.onMessage.addListener((msg) => {
 /* Only one panel should ever be visible: when the standalone window is up, the
    in-page panel steps aside, and comes back when that window closes. */
 function setPanelVisible(on) {
-  if (IS_PANEL || !host) return;
+  if (IS_PANEL || !host || dismissed) return;
   if (!on) stopAll();
   host.style.setProperty('display', on ? 'block' : 'none', 'important');
 }

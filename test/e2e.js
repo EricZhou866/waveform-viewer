@@ -124,6 +124,52 @@ const SR = `(() => { const h = document.getElementById('__wf_viewer_host'); retu
   ok('lane area scrolls', laneCss.of === 'auto', laneCss);
   ok('lane area has a pixel height, so the panel can be resized', /px$/.test(laneCss.mh) && parseFloat(laneCss.mh) > 100, laneCss);
 
+  /* the toolbar is icons, and it is legible */
+  const tools = await page.evaluate(`(() => {
+      const out = { labels: [], hidden: [], btn: 0, ico: 0 };
+      ${SR}.querySelectorAll('.tools .btn').forEach(b => {
+        out.labels.push(b.dataset.act + ':' + b.textContent);
+        if (getComputedStyle(b).display === 'none') out.hidden.push(b.dataset.act);
+      });
+      out.btn = parseFloat(getComputedStyle(${SR}.querySelector('[data-act="settings"]')).fontSize);
+      out.ico = parseFloat(getComputedStyle(${SR}.querySelector('.lane .ico')).fontSize);
+      out.icoColor = getComputedStyle(${SR}.querySelector('.lane .ico')).color;
+      return out; })()`);
+  ok('every toolbar button is an icon, no text labels',
+     tools.labels.every(l => l.split(':')[1].length <= 2), tools.labels);
+  ok('Play, Files and Clear sit together at the front',
+     tools.labels.slice(0, 3).map(l => l.split(':')[0]).join() === 'play,files,clear', tools.labels);
+  ok('Shift, lane height and Rescan are hidden by default',
+     ['move', 'taller', 'shorter', 'rescan'].every(a => tools.hidden.indexOf(a) >= 0), tools.hidden);
+  ok('toolbar icons are big enough to read', tools.btn >= 14, tools.btn);
+  ok('lane icons are big enough, and light enough to see',
+     tools.ico >= 14 && tools.icoColor !== 'rgb(133, 147, 173)', tools);
+
+  // Pick the checkbox by its label, not by position: the settings sheet grows.
+  const extraShown = async (on) => {
+    await page.evaluate(`(() => {
+        const row = [...${SR}.querySelectorAll('.sheet .row')]
+          .find(r => r.textContent.indexOf('Show extra buttons') >= 0);
+        const cb = row.querySelector('input[type=checkbox]');
+        cb.checked = ${on}; cb.dispatchEvent(new Event('change')); })()`);
+    await sleep(200);
+    return page.evaluate(`['move','taller','shorter','rescan'].every(a =>
+        getComputedStyle(${SR}.querySelector('[data-act="' + a + '"]')).display !== 'none')`);
+  };
+  await page.evaluate(`${SR}.querySelector('[data-act="settings"]').click()`);
+  ok('the setting brings the extra buttons back', (await extraShown(true)) === true);
+  ok('and takes them away again', (await extraShown(false)) === false);
+  await page.evaluate(`${SR}.querySelector('[data-act="settings"]').click()`);
+
+  /* minimised, the panel should get out of the way */
+  const wide = await page.evaluate(`${SR}.querySelector('.panel').getBoundingClientRect().width`);
+  await page.evaluate(`${SR}.querySelector('[data-act="fold"]').click()`);
+  await sleep(250);
+  const narrow = await page.evaluate(`${SR}.querySelector('.panel').getBoundingClientRect().width`);
+  ok('minimised, the panel shrinks to its buttons', narrow < 200 && narrow < wide / 2, { wide, narrow });
+  await page.evaluate(`${SR}.querySelector('[data-act="fold"]').click()`);
+  await sleep(250);
+
   const names = () => page.evaluate(`[...${SR}.querySelectorAll('.lane .name')].map(n => n.textContent)`);
   let ns = await names();
   ok('the 4.70s and 3.0s clips got lanes', ns.length === 2, ns);
@@ -369,6 +415,26 @@ const SR = `(() => { const h = document.getElementById('__wf_viewer_host'); retu
   ok('switching it back on injects the hook into a tab that never had it',
      (await pageC.evaluate(`!!document.getElementById('__wf_viewer_host')`)) === true);
   await pageC.close();
+
+  /* ✕ closes the panel on this page, and the toolbar button brings it back */
+  await page.evaluate(`window.playSet(['ref.mp3'])`);
+  await sleep(2200);
+  ok('there is a panel to close', (await page.evaluate(`!!${SR}`)) === true);
+  await page.evaluate(`${SR}.querySelector('[data-act="hide"]').click()`);
+  await sleep(400);
+  const closed = await page.evaluate(`({
+      hidden: getComputedStyle(document.getElementById('__wf_viewer_host')).display === 'none',
+      lanes: ${SR}.querySelectorAll('.lane').length })`);
+  ok('closing hides the panel and takes its lanes with it',
+     closed.hidden === true && closed.lanes === 0, closed);
+  await page.evaluate(`window.playSet(['mine.mp3'])`);
+  await sleep(2000);
+  ok('a closed panel stays closed when new audio arrives',
+     (await page.evaluate(`getComputedStyle(document.getElementById('__wf_viewer_host')).display`)) === 'none');
+  await toggleAny(); await sleep(700);       // off
+  await toggleAny(); await sleep(1000);      // on, from this tab
+  ok('the toolbar button brings the closed panel back',
+     (await page.evaluate(`getComputedStyle(document.getElementById('__wf_viewer_host')).display`)) === 'block');
 
   /* a profile carrying the old default cap of 4 is lifted on load */
   const sw = ctx.serviceWorkers()[0];
