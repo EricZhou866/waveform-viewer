@@ -1338,6 +1338,7 @@ src/ + manifests/<target>.json  →  build/<target>/  →  dist/*.zip
 
 ### 21.2 发布前检查
 
+0. **`store/reviewer-notes.md` 必须 ≤ 3000 字符**——AMO 的 Notes for Reviewers 栏位硬限制，整篇粘贴。改完用 `python3 -c "print(len(open('store/reviewer-notes.md').read()))"` 量一下。这份说明是**按版本填的**，每次提交都要重新粘，不会从上一版继承。
 0. **版本号不能重用**。AMO 一旦收过某个版本号就永久占用它，删掉也不释放——再传同一个号会被拒（`Version X was uploaded before and deleted`）。上传失败要重来时，改号重传，不要试图复用。
 1. 三份 manifest 版本号一致（`manifests/chrome.json` 是唯一真实来源）
 2. `npx addons-linter dist/waveform-viewer-firefox-<ver>.zip` → 0/0/0
