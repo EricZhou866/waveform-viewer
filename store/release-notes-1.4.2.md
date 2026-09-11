@@ -1,14 +1,14 @@
-# AMO release notes — 1.4.1
+# AMO release notes — 1.4.2
 
 Paste the section below into the **Release Notes** field when submitting the
 version. 1.3.0 is the published version, so this covers everything since it.
-(1.3.1, 1.3.2 and 1.4.0 were never published; their changes are included here.
-1.4.0 is not reusable as a version number — AMO reserves a version string for
-good once it has been uploaded, even if the upload is deleted afterwards.)
+(1.3.1 through 1.4.1 were never published; their changes are included here. A
+version string cannot be reused on AMO once uploaded, even if the upload is
+deleted, which is why the numbers skip.)
 
 ---
 
-**A clearer toolbar.** Every button is an icon now, with the action in its
+**A new icon**, and a clearer toolbar. Every button is an icon now, with the action in its
 tooltip. Play, open a file, and clear sit together at the front — the three
 things you reach for most. Shift, lane height and Rescan have moved off the
 toolbar; turn on **Show extra buttons** in Settings to bring them back.
