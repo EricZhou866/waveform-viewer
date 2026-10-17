@@ -58,6 +58,19 @@ ok('the build matches src/');
 
 const SOURCE_ZIP = path.join(REPO, 'dist', `waveform-viewer-source-${VERSION}.zip`);
 
+/* ---- the linter is what predicts an AMO rejection, so it is a gate ----
+   Its verdict depends on its own version: an addons-linter too old to know a
+   manifest key calls that key reserved and fails a package AMO is perfectly
+   happy with. Hence the pinned range in package.json. */
+const zip = path.join(REPO, 'dist', `waveform-viewer-firefox-${VERSION}.zip`);
+if (!fs.existsSync(zip)) die(`dist/waveform-viewer-firefox-${VERSION}.zip is missing — run ./build.sh`);
+const lint = spawnSync('npx', ['addons-linter', zip], { cwd: REPO, encoding: 'utf8' });
+if (lint.status !== 0) {
+  console.error((lint.stdout || '') + (lint.stderr || ''));
+  die('addons-linter rejected the package — AMO will too');
+}
+ok('addons-linter: clean');
+
 /* ---- the text that goes with it ---- */
 const notesFile = path.join(REPO, 'store', `release-notes-${VERSION}.md`);
 if (!fs.existsSync(notesFile)) die(`store/release-notes-${VERSION}.md is missing`);
@@ -87,6 +100,7 @@ try {
 }
 
 /* ---- credentials ---- */
+console.log('  · run `npm test` too if you have not since the last code change');
 if (!process.env.WEB_EXT_API_KEY || !process.env.WEB_EXT_API_SECRET) {
   die('WEB_EXT_API_KEY and WEB_EXT_API_SECRET are not set.\n' +
       '    Generate them at https://addons.mozilla.org/en-US/developers/addon/api/key/\n' +
