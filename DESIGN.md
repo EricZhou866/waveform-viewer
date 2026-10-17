@@ -1362,14 +1362,26 @@ src/ + manifests/<target>.json  →  build/<target>/  →  dist/*.zip
 浏览器那条路要登录，登录这件事没法脚本化、也没法交给别人代劳。AMO 有提交 API，`web-ext` 会说这套协议：
 
 ```bash
-export WEB_EXT_API_KEY=user:12345678:123     # "JWT issuer"
-export WEB_EXT_API_SECRET=...                # "JWT secret"
+npm run amo:key                              # 存一次凭据（macOS Keychain）
 ./build.sh
 npm run publish:amo -- --dry-run             # 全套检查，什么都不上传
 npm run publish:amo                          # 真的提交
 ```
 
-凭据在 <https://addons.mozilla.org/en-US/developers/addon/api/key/> 生成，是**账号级**的，等同密码；只从环境变量读，不进仓库。
+凭据在 <https://addons.mozilla.org/en-US/developers/addon/api/key/> 生成，是**账号级**的，等同密码。
+
+**存在 Keychain，不存在 dotfile 里。** 常见做法是往 `~/.zshrc` 里塞两行 export——那等于把一个账号级密钥写进一个会被备份、会被同步、会在截屏和录屏里出现、所有子进程都读得到的明文文件。`npm run amo:key` 改存登录钥匙串：
+
+- `security add-generic-password -w` 不带值时是**交互式提示**，所以密钥不经过命令行，不进 shell history，也不出现在进程列表里；
+- `publish-amo.js` 在环境变量缺失时才去钥匙串取，取到也绝不打印；
+- 传给 `web-ext` 时走环境变量而不是 argv，同样是为了不进进程列表。
+
+环境变量优先级更高，CI 里直接注入即可，不受影响。删除：
+
+```bash
+security delete-generic-password -s waveform-viewer-amo -a key
+security delete-generic-password -s waveform-viewer-amo -a secret
+```
 
 `tools/publish-amo.js` 在**上传之前**把下面这些全查一遍——因为 AMO 的上传不可撤销，版本号一旦被它收到就永久占用，删掉也不释放：
 
