@@ -208,7 +208,14 @@ window.addEventListener('message', (e) => {
    the audio it has seen, for sites that replay without a fresh request. */
 function rescan() {
   scanDom();
-  try { window.postMessage({ __wfCmd: 'rescan' }, '*'); } catch (e) {}
+  hookCmd('rescan');
+}
+
+/* Commands to the page-world hook. The page can see these; they carry nothing
+   but the command name, and the hook only ever uses them to decide whether to
+   do its own work. */
+function hookCmd(cmd) {
+  try { window.postMessage({ __wfCmd: cmd }, '*'); } catch (e) {}
 }
 
 function scanDom() {
@@ -1894,6 +1901,10 @@ api.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === 'wf:enabled') {
     enabled = msg.enabled;
     if (!enabled) {
+      // Tell the page-world hook to stand down. It cannot be uninstalled, and
+      // ignoring its messages on this side is not the same as it not doing the
+      // work: it would go on computing peaks for every decode in this tab.
+      hookCmd('off');
       stopAll();
       [...lanes.keys()].forEach(dropLane);
       if (host) { host.remove(); host = null; shadow = null; lanesBox = null; statusEl = null; }
@@ -1904,6 +1915,7 @@ api.runtime.onMessage.addListener((msg) => {
          panel exists because a lane does. Only the tab whose toolbar button was
          clicked gets one unasked, as the click's own feedback. */
       injectHook();          // this tab may never have had the hook
+      hookCmd('on');         // ...and if it did, it is dormant
       if (msg.active) {
         dismissed = false;   // an explicit click outranks an earlier ✕
         ensurePanel();

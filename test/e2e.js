@@ -416,6 +416,36 @@ const SR = `(() => { const h = document.getElementById('__wf_viewer_host'); retu
      (await pageC.evaluate(`!!document.getElementById('__wf_viewer_host')`)) === true);
   await pageC.close();
 
+  /* Switching off has to stop the page-world hook, not just make this side
+     ignore it. The hook computes peaks over every sample of every decoded
+     buffer, so a hook left running is real work done on audio the user asked
+     the extension to leave alone. Counted in the page itself. */
+  const tap = () => page.evaluate(`(() => {
+      window.__wfSeen = 0;
+      window.addEventListener('message', (e) => {
+        if (e.source === window && e.data && e.data.__wf === 1) window.__wfSeen++;
+      });
+    })()`);
+  const seen = () => page.evaluate(`window.__wfSeen`);
+
+  await tap();
+  await page.evaluate(`window.playSet(['ref.mp3'])`);
+  await sleep(2200);
+  ok('while on, the hook reports what the page decodes', (await seen()) > 0, await seen());
+
+  await toggleAny(); await sleep(900);                 // off
+  await page.evaluate(`window.__wfSeen = 0`);
+  await page.evaluate(`window.playSet(['mine.mp3','c3.mp3'])`);
+  await sleep(2600);
+  ok('switched off, the hook goes quiet in a tab that already had it',
+     (await seen()) === 0, await seen());
+
+  await toggleAny(); await sleep(1200);                // back on
+  await page.evaluate(`window.__wfSeen = 0`);
+  await page.evaluate(`window.playSet(['c4.mp3'])`);
+  await sleep(2400);
+  ok('switching back on wakes the dormant hook', (await seen()) > 0, await seen());
+
   /* ✕ closes the panel on this page, and the toolbar button brings it back */
   await page.evaluate(`window.playSet(['ref.mp3'])`);
   await sleep(2200);

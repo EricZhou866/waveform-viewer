@@ -195,7 +195,11 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg.type === 'wf:fetch') {
-    proxyFetch(msg.url).then(sendResponse);
+    // The switch is the one place that decides whether this extension touches
+    // the network at all, so the proxy checks it too rather than trusting that
+    // a disabled content script will never ask.
+    isEnabled().then((on) => on ? proxyFetch(msg.url) : { error: 'disabled' })
+               .then(sendResponse);
     return true;
   }
   if (msg.type === 'wf:openPanel') {

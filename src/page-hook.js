@@ -24,6 +24,14 @@
   var PEAK_N = 2048;
   var seq = 0;
   var lastUrl = '';
+  /* The hook cannot be uninstalled — other code may have wrapped these same
+     functions after us, and handing back the originals would throw that away.
+     So it goes dormant instead: every wrapper still calls through, but does no
+     work of its own. This matters because the expensive part is peaksOf(),
+     which walks every sample of every decoded buffer. Leaving that running
+     after the user switched the extension off would keep burning CPU on audio
+     they asked it to stop looking at. */
+  var active = true;
   /* url -> last time it was announced. This is a storm guard, NOT a permanent
      de-duplication: a site that replays the same file must be able to announce
      it again, otherwise closing a lane would make that clip unreachable until
@@ -33,6 +41,7 @@
   var REANNOUNCE_MS = 900;
 
   function post(msg) {
+    if (!active) return;
     try { msg.__wf = 1; window.postMessage(msg, '*'); } catch (e) {}
   }
 
@@ -47,7 +56,7 @@
   }
 
   function pushUrl(u) {
-    if (!u) return;
+    if (!active || !u) return;
     var now = Date.now();
     lastUrl = u;
     if (now - (announced[u] || 0) < REANNOUNCE_MS) return;
@@ -67,7 +76,7 @@
      sent. DOM elements are found by the content script's own scan anyway;
      this covers detached `new Audio()` instances. */
   function pushMedia(el) {
-    if (!el) return;
+    if (!active || !el) return;
     var send = function () {
       var u = '';
       try { u = el.currentSrc || el.src || ''; } catch (e) {}
@@ -136,7 +145,7 @@
 
   function recordBuffer(buffer) {
     try {
-      if (!buffer || !buffer.length) return;
+      if (!active || !buffer || !buffer.length) return;
       var p = peaksOf(buffer);
       post({ kind: 'decoded', id: ++seq, url: lastUrl,
              duration: buffer.duration, mins: p.mins, maxs: p.maxs });
@@ -208,6 +217,7 @@
       if (isAudioUrl(r.name) || r.initiatorType === 'audio' || r.initiatorType === 'video') pushUrl(r.name);
     });
     var po = new PerformanceObserver(function (list) {
+      if (!active) return;
       list.getEntries().forEach(function (r) {
         if (isAudioUrl(r.name) || r.initiatorType === 'audio' || r.initiatorType === 'video') pushUrl(r.name);
       });
@@ -220,7 +230,20 @@
   window.addEventListener('message', function (e) {
     if (e.source !== window) return;
     var d = e.data;
-    if (!d || d.__wfCmd !== 'rescan') return;
+    if (!d || typeof d.__wfCmd !== 'string') return;
+
+    /* The switch went off. Go quiet and forget what was seen: "off" has to mean
+       the page is left alone, not that the results are collected and dropped on
+       the floor by the other side. */
+    if (d.__wfCmd === 'off') {
+      active = false;
+      lastUrl = '';
+      announced = Object.create(null);
+      return;
+    }
+    if (d.__wfCmd === 'on') { active = true; return; }
+
+    if (d.__wfCmd !== 'rescan' || !active) return;
     try {
       var keys = Object.keys(announced);
       keys.sort(function (a, b) { return announced[b] - announced[a]; });
