@@ -1357,7 +1357,37 @@ src/ + manifests/<target>.json  →  build/<target>/  →  dist/*.zip
 
 版本号从 `manifests/chrome.json` 读，是唯一真实来源；发版时三份 manifest 一起改。
 
-### 21.2 发布前检查
+### 21.2 命令行发布到 AMO
+
+浏览器那条路要登录，登录这件事没法脚本化、也没法交给别人代劳。AMO 有提交 API，`web-ext` 会说这套协议：
+
+```bash
+export WEB_EXT_API_KEY=user:12345678:123     # "JWT issuer"
+export WEB_EXT_API_SECRET=...                # "JWT secret"
+./build.sh
+npm run publish:amo -- --dry-run             # 全套检查，什么都不上传
+npm run publish:amo                          # 真的提交
+```
+
+凭据在 <https://addons.mozilla.org/en-US/developers/addon/api/key/> 生成，是**账号级**的，等同密码；只从环境变量读，不进仓库。
+
+`tools/publish-amo.js` 在**上传之前**把下面这些全查一遍——因为 AMO 的上传不可撤销，版本号一旦被它收到就永久占用，删掉也不释放：
+
+| 检查 | 不通过就是 |
+|------|-----------|
+| 三份 manifest 版本号一致 | 发出去的和以为发的不是一个版本 |
+| 工作区干净 | 发布的构建不在 git 里，事后无从复现 |
+| `build/firefox` 是该版本的 MV2 构建 | 传错渠道或传了旧构建 |
+| 构建内容与 `src/` 逐文件比对 | `build.sh` 没重跑 |
+| `addons-linter` 通过 | AMO 一定也会拒 |
+| release notes 存在且 ≤3000 字符 | 表单那头报错，白跑一趟 |
+| reviewer notes ≤3000 字符 | 同上（见 §21.3） |
+| 该版本号不是线上当前版本 | 重复提交 |
+| 凭据存在 | 到最后一步才失败 |
+
+**linter 的结论取决于 linter 自己的版本。** `addons-linter@7.20.0` 不认识 `data_collection_permissions`，会把它报成"保留字段"——对一个 AMO 已经收过两次的包报出 1 个 error。所以 `package.json` 把范围钉在 `^10`，并提交了 `package-lock.json`。
+
+### 21.3 发布前检查
 
 0. **`store/reviewer-notes.md` 必须 ≤ 3000 字符**——AMO 的 Notes for Reviewers 栏位硬限制，整篇粘贴。改完用 `python3 -c "print(len(open('store/reviewer-notes.md').read()))"` 量一下。这份说明是**按版本填的**，每次提交都要重新粘，不会从上一版继承。
 0. **版本号不能重用**。AMO 一旦收过某个版本号就永久占用它，删掉也不释放——再传同一个号会被拒（`Version X was uploaded before and deleted`）。上传失败要重来时，改号重传，不要试图复用。
@@ -1366,7 +1396,7 @@ src/ + manifests/<target>.json  →  build/<target>/  →  dist/*.zip
 3. `node test/e2e.js` 全绿
 4. 在两个浏览器里手工装一遍，过一遍 `test/real.html`
 
-### 21.3 商店素材
+### 21.4 商店素材
 
 `store/` 目录：`listing-en.md`（名称、简短描述、详细描述、权限说明）、`privacy-policy.md`、`reviewer-notes.md`、`release-notes-<ver>.md`、`screenshots/`、`make-screenshots.js`。
 

@@ -39,6 +39,11 @@ git clone https://github.com/EricZhou866/waveform-viewer.git && cd waveform-view
 ./build.sh          # writes dist/waveform-viewer-{chrome,firefox}-<ver>.zip
 ```
 
+The extension itself has no dependencies and no build step — `build.sh` copies
+`src/` and picks a manifest. `npm install` only brings in dev tooling: the test
+run, the add-on linter, and `npm run publish:amo`, which submits the Firefox
+build to addons.mozilla.org from the shell (see DESIGN.md §21.2).
+
 - *Chrome*: `chrome://extensions` → Developer mode → **Load unpacked** → `build/chrome`
 - *Firefox*: `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on** →
   `build/firefox/manifest.json` (temporary add-ons are removed when Firefox restarts)
