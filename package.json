@@ -7,7 +7,9 @@
     "test": "node test/e2e.js",
     "lint:amo": "addons-linter $(ls -t dist/waveform-viewer-firefox-*.zip | head -1)",
     "amo:key": "./tools/amo-key.sh",
-    "publish:amo": "node tools/publish-amo.js"
+    "cws:key": "node tools/cws-key.js",
+    "publish:amo": "node tools/publish-amo.js",
+    "publish:chrome": "node tools/publish-chrome.js"
   },
   "devDependencies": {
     "addons-linter": "^10",
