@@ -4,10 +4,11 @@
  *   npm run build && npm run publish:amo -- --dry-run     # check, upload nothing
  *   npm run build && npm run publish:amo
  *
- * Credentials come from the environment and are never read from the repo:
+ * Credentials never live in the repo. They come from the macOS Keychain, or
+ * from the environment if it has them:
  *
- *   export WEB_EXT_API_KEY=user:12345678:123          # "JWT issuer"
- *   export WEB_EXT_API_SECRET=...                     # "JWT secret"
+ *   npm run amo:key                                   # store them, once
+ *   export WEB_EXT_API_KEY=... WEB_EXT_API_SECRET=... # or per shell / in CI
  *
  * Both are generated at https://addons.mozilla.org/en-US/developers/addon/api/key/
  * and are account-wide — treat them like a password.
@@ -99,14 +100,33 @@ try {
   console.log('  · could not reach the AMO API to check the live version — continuing');
 }
 
-/* ---- credentials ---- */
-console.log('  · run `npm test` too if you have not since the last code change');
-if (!process.env.WEB_EXT_API_KEY || !process.env.WEB_EXT_API_SECRET) {
-  die('WEB_EXT_API_KEY and WEB_EXT_API_SECRET are not set.\n' +
-      '    Generate them at https://addons.mozilla.org/en-US/developers/addon/api/key/\n' +
-      '    and export them in this shell (they are account-wide — treat them like a password).');
+/* ---- credentials ----
+   The Keychain keeps them encrypted and out of dotfiles, shell history and
+   backups. The environment still wins, so CI can pass them in. Neither value is
+   ever printed. */
+const KEYCHAIN_SERVICE = 'waveform-viewer-amo';
+function fromKeychain(account) {
+  const r = spawnSync('security',
+    ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', account, '-w'],
+    { encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.trim() : '';
 }
-ok('API credentials present in the environment');
+console.log('  · run `npm test` too if you have not since the last code change');
+let source = 'the environment';
+let apiKey = process.env.WEB_EXT_API_KEY || '';
+let apiSecret = process.env.WEB_EXT_API_SECRET || '';
+if ((!apiKey || !apiSecret) && process.platform === 'darwin') {
+  const k = fromKeychain('key'), s2 = fromKeychain('secret');
+  if (k && s2) { apiKey = k; apiSecret = s2; source = 'the macOS Keychain'; }
+}
+if (!apiKey || !apiSecret) {
+  die('no AMO credentials.\n' +
+      '    Store them once:   npm run amo:key\n' +
+      '    or per shell:      export WEB_EXT_API_KEY=... WEB_EXT_API_SECRET=...\n' +
+      '    Generate them at https://addons.mozilla.org/en-US/developers/addon/api/key/\n' +
+      '    They are account-wide — treat them like a password.');
+}
+ok('API credentials, from ' + source);
 
 /* ---- metadata file for the submission API ---- */
 const metaPath = path.join(REPO, 'dist', `amo-metadata-${VERSION}.json`);
@@ -135,6 +155,11 @@ const args = ['web-ext', 'sign',
 if (fs.existsSync(SOURCE_ZIP)) args.push('--upload-source-code', SOURCE_ZIP);
 
 console.log('\n  → npx ' + args.join(' ') + '\n');
-const run = spawnSync('npx', args, { cwd: REPO, stdio: 'inherit' });
+// Passed as environment rather than on the command line, so they stay out of
+// the process list and out of shell history.
+const run = spawnSync('npx', args, {
+  cwd: REPO, stdio: 'inherit',
+  env: Object.assign({}, process.env, { WEB_EXT_API_KEY: apiKey, WEB_EXT_API_SECRET: apiSecret })
+});
 if (run.status !== 0) die('web-ext sign failed — see the output above. The version number may now be used up.');
 console.log(`\n  ✓ ${VERSION} submitted to AMO. It is in the review queue; you will get an email.\n`);
