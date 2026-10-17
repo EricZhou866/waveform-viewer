@@ -1410,7 +1410,9 @@ npm run publish:chrome -- --dry-run
 npm run publish:chrome
 ```
 
-一次性配置在 Google Cloud 控制台：建项目 → 启用 **Chrome Web Store API** → OAuth 同意屏幕设为 External 并把自己加进测试用户 → 创建 **Desktop app** 类型的 OAuth client，拿到 client id 和 secret。
+一次性配置在 Google Cloud 控制台：建项目 → 启用 **Chrome Web Store API** → Google Auth Platform 的 Audience 设为 External → 创建 **Desktop app** 类型的 OAuth client，拿到 client id 和 secret。
+
+**必须把应用从 Testing 改成 In production**（Audience 页面的 "Publish app"）。**Testing 状态下签发的 refresh token 七天后过期**，到时候 `publish:chrome` 会报 `invalid_grant`——而那时离配置这套东西已经过了一周，没人会想到是这个原因。生产状态下 refresh token 不会自己过期。同意屏幕会提示"应用未经验证"，对一个自己发自己扩展的工具来说这是正常的，不影响使用。
 
 `tools/cws-key.js` 接着做完剩下的：**监听一个 127.0.0.1 的端口**接收回调，而不是让你从页面上抄 code——Google 2022 年起就不收那种流程了，桌面类型的 client 只允许重定向到 loopback。
 

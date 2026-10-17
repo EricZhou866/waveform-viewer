@@ -6,8 +6,14 @@
  * Before running it, in the Google Cloud console (once):
  *   1. create or pick a project
  *   2. enable "Chrome Web Store API"
- *   3. OAuth consent screen: External, and add your own address as a test user
- *   4. Credentials → Create credentials → OAuth client ID → **Desktop app**
+ *   3. Google Auth Platform → Audience: External
+ *   4. ...then press "Publish app" so the app is In production, NOT Testing.
+ *      A refresh token issued by an app still in Testing expires after seven
+ *      days, and publishing then fails with invalid_grant long after anyone
+ *      remembers configuring this. In production the token does not expire.
+ *      The consent screen will warn that the app is unverified; that is
+ *      expected for a personal publishing tool and does not block it.
+ *   5. Clients → Create client → Application type: **Desktop app**
  *      That gives a client ID and client secret.
  *
  * This script takes those two, walks the consent flow, and stores all three —
