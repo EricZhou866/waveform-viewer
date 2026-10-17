@@ -1399,7 +1399,26 @@ security delete-generic-password -s waveform-viewer-amo -a secret
 
 **linter 的结论取决于 linter 自己的版本。** `addons-linter@7.20.0` 不认识 `data_collection_permissions`，会把它报成"保留字段"——对一个 AMO 已经收过两次的包报出 1 个 error。所以 `package.json` 把范围钉在 `^10`，并提交了 `package-lock.json`。
 
-### 21.3 发布前检查
+### 21.3 命令行发布到 Chrome Web Store
+
+同样的理由：后台要 Google 登录，登录没法脚本化。CWS 有发布 API，认证用 OAuth refresh token，而 refresh token 不会自己过期，所以配置只做一次。
+
+```bash
+npm run cws:key                              # 一次性：走 OAuth，存进 Keychain
+./build.sh
+npm run publish:chrome -- --dry-run
+npm run publish:chrome
+```
+
+一次性配置在 Google Cloud 控制台：建项目 → 启用 **Chrome Web Store API** → OAuth 同意屏幕设为 External 并把自己加进测试用户 → 创建 **Desktop app** 类型的 OAuth client，拿到 client id 和 secret。
+
+`tools/cws-key.js` 接着做完剩下的：**监听一个 127.0.0.1 的端口**接收回调，而不是让你从页面上抄 code——Google 2022 年起就不收那种流程了，桌面类型的 client 只允许重定向到 loopback。
+
+检查项和 AMO 那套同构（工作区干净、三份 manifest 一致、`build/chrome` 确实是该版本的 MV3 构建且与 `src/` 逐文件相符、description 不超过商店强制的 132 字符）。Chrome 比 AMO 宽容一点——**上传失败不会烧掉版本号**——但一个有问题的包进了审核队列照样要赔几天。
+
+**截图和 listing 文案不在这条路径里**，它们不是 API 里的版本化产物，只能在后台改（素材在 `store/screenshots/`）。
+
+### 21.4 发布前检查
 
 0. **`store/reviewer-notes.md` 必须 ≤ 3000 字符**——AMO 的 Notes for Reviewers 栏位硬限制，整篇粘贴。改完用 `python3 -c "print(len(open('store/reviewer-notes.md').read()))"` 量一下。这份说明是**按版本填的**，每次提交都要重新粘，不会从上一版继承。
 0. **版本号不能重用**。AMO 一旦收过某个版本号就永久占用它，删掉也不释放——再传同一个号会被拒（`Version X was uploaded before and deleted`）。上传失败要重来时，改号重传，不要试图复用。
@@ -1408,7 +1427,7 @@ security delete-generic-password -s waveform-viewer-amo -a secret
 3. `node test/e2e.js` 全绿
 4. 在两个浏览器里手工装一遍，过一遍 `test/real.html`
 
-### 21.4 商店素材
+### 21.5 商店素材
 
 `store/` 目录：`listing-en.md`（名称、简短描述、详细描述、权限说明）、`privacy-policy.md`、`reviewer-notes.md`、`release-notes-<ver>.md`、`screenshots/`、`make-screenshots.js`。
 
