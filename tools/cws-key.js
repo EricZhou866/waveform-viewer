@@ -23,12 +23,21 @@
  * The consent redirect goes to 127.0.0.1 on a port this script listens on.
  * Google stopped accepting the old copy-the-code-from-the-page flow in 2022,
  * and a desktop OAuth client is only allowed to redirect to loopback.
+ *
+ *   npm run cws:key -- --reuse
+ *
+ * takes the client ID and secret already in the keychain and only walks the
+ * consent flow again, which is what you want when the refresh token died but
+ * the OAuth client itself is fine — a token issued while the app was still in
+ * Testing, say. Nothing has to be fetched out of the console, and the secret
+ * is never printed or retyped.
  */
 'use strict';
 const http = require('http');
 const readline = require('readline');
 const { spawnSync } = require('child_process');
 
+const REUSE = process.argv.includes('--reuse');
 const SERVICE = 'waveform-viewer-cws';
 const SCOPE = 'https://www.googleapis.com/auth/chromewebstore';
 const die = (m) => { console.error('\n  ✗ ' + m + '\n'); process.exit(1); };
@@ -39,6 +48,11 @@ function keychainSet(account, secret) {
   const r = spawnSync('security',
     ['add-generic-password', '-U', '-s', SERVICE, '-a', account, '-w', secret], { encoding: 'utf8' });
   if (r.status !== 0) die('could not write to the keychain: ' + (r.stderr || '').trim());
+}
+function keychainGet(account) {
+  const r = spawnSync('security',
+    ['find-generic-password', '-s', SERVICE, '-a', account, '-w'], { encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.trim() : '';
 }
 const ask = (q, quiet) => new Promise((res) => {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
@@ -51,10 +65,18 @@ const ask = (q, quiet) => new Promise((res) => {
 
 (async () => {
   console.log('\nChrome Web Store API credentials\n');
-  const id = await ask('OAuth client ID:     ');
-  if (!id) die('no client ID');
-  const secret = await ask('OAuth client secret: ', true);
-  if (!secret) die('no client secret');
+  let id, secret;
+  if (REUSE) {
+    id = keychainGet('client_id');
+    secret = keychainGet('client_secret');
+    if (!id || !secret) die('no client ID and secret in the keychain to reuse — run without --reuse');
+    console.log('Reusing the OAuth client already in the keychain; renewing the refresh token only.');
+  } else {
+    id = await ask('OAuth client ID:     ');
+    if (!id) die('no client ID');
+    secret = await ask('OAuth client secret: ', true);
+    if (!secret) die('no client secret');
+  }
 
   // A loopback server catches the redirect, so nothing has to be copied by hand.
   const server = http.createServer();

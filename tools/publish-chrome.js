@@ -77,24 +77,50 @@ if (!(cfg.client_id && cfg.client_secret && cfg.refresh_token)) {
 }
 ok('API credentials, from ' + source);
 
-if (DRY) {
-  console.log(`\n  Would upload ${path.relative(REPO, ZIP)} to item ${ITEM_ID} and submit it for review.`);
-  console.log('  Dry run: nothing uploaded. Drop --dry-run to publish.\n');
-  console.log('  Screenshots and listing text are NOT part of this: they live in the\n' +
-              '  dashboard and have to be updated there (store/screenshots/).\n');
-  process.exit(0);
-}
-
-(async () => {
+/* Exchanging the refresh token is part of the dry run on purpose. Having
+   credentials is not the same as having working credentials: a refresh token
+   issued while the OAuth app was still in Testing dies after seven days, and a
+   check that stops at "the keychain has three values" passes happily right up
+   to the real upload. */
+async function accessToken() {
   const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     body: new URLSearchParams({ client_id: cfg.client_id, client_secret: cfg.client_secret,
                                 refresh_token: cfg.refresh_token, grant_type: 'refresh_token' })
   });
   const tok = await tokenRes.json();
-  if (!tok.access_token) die('could not get an access token: ' + JSON.stringify(tok));
-  const auth = { Authorization: 'Bearer ' + tok.access_token, 'x-goog-api-version': '2' };
+  if (!tok.access_token) {
+    const hint = tok.error === 'invalid_grant'
+      ? '\n    The refresh token is dead. The usual cause is an OAuth app left in\n' +
+        '    Testing, which expires its tokens after seven days — check\n' +
+        '    Google Auth Platform → Audience says "In production", then:\n' +
+        '      npm run cws:key -- --reuse'
+      : '';
+    die('could not get an access token: ' + JSON.stringify(tok) + hint);
+  }
+  return { Authorization: 'Bearer ' + tok.access_token, 'x-goog-api-version': '2' };
+}
+
+(async () => {
+  const auth = await accessToken();
   ok('access token');
+
+  // Reading the item back proves the token belongs to an account that can
+  // actually publish this extension, not merely to some Google account.
+  const chk = await fetch(`https://www.googleapis.com/chromewebstore/v1.1/items/${ITEM_ID}?projection=DRAFT`,
+                          { headers: auth });
+  const chkJson = await chk.json().catch(() => ({}));
+  if (!chk.ok) die(`the token cannot see item ${ITEM_ID} — is it the publisher's account?\n    ` +
+                   JSON.stringify(chkJson));
+  ok('the account can reach the item' + (chkJson.crxVersion ? `, currently ${chkJson.crxVersion}` : ''));
+
+  if (DRY) {
+    console.log(`\n  Would upload ${path.relative(REPO, ZIP)} to item ${ITEM_ID} and submit it for review.`);
+    console.log('  Dry run: nothing uploaded. Drop --dry-run to publish.\n');
+    console.log('  Screenshots and listing text are NOT part of this: they live in the\n' +
+                '  dashboard and have to be updated there (store/screenshots/).\n');
+    process.exit(0);
+  }
 
   const up = await fetch(`https://www.googleapis.com/upload/chromewebstore/v1.1/items/${ITEM_ID}`, {
     method: 'PUT', headers: auth, body: fs.readFileSync(ZIP)

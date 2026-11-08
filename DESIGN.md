@@ -1448,9 +1448,21 @@ npm run publish:chrome
 
 **必须把应用从 Testing 改成 In production**（Audience 页面的 "Publish app"）。**Testing 状态下签发的 refresh token 七天后过期**，到时候 `publish:chrome` 会报 `invalid_grant`——而那时离配置这套东西已经过了一周，没人会想到是这个原因。生产状态下 refresh token 不会自己过期。同意屏幕会提示"应用未经验证"，对一个自己发自己扩展的工具来说这是正常的，不影响使用。
 
+**"Publish app" 按钮是灰的时候**，提示只说"去 Branding 页面补完配置"，但不说缺什么。缺的是 **Application home page**、**Application privacy policy link**，以及这两个 URL 的域名要登记进 **Authorized domains**（本仓库填 GitHub 仓库地址和 `store/privacy-policy.md` 的 blob 链接，域名 `github.com`）。填完存盘，按钮才会亮。
+
+**OAuth 项目必须建在扩展发布者那个 Google 账号下**（本扩展是 `ericzhou866@gmail.com`，项目 `waveform-viewer-511922`）。token 属于某个 Google 账号,不属于某台机器——换个账号签出来的 token 能换到 access token，却读不到这个 item。
+
+refresh token 作废、但 OAuth client 本身没问题时（上面那个七天的坑就是），不用回控制台翻 secret：
+
+```bash
+npm run cws:key -- --reuse                   # 复用 Keychain 里的 client id/secret，只重走一次同意
+```
+
 `tools/cws-key.js` 接着做完剩下的：**监听一个 127.0.0.1 的端口**接收回调，而不是让你从页面上抄 code——Google 2022 年起就不收那种流程了，桌面类型的 client 只允许重定向到 loopback。
 
 检查项和 AMO 那套同构（工作区干净、三份 manifest 一致、`build/chrome` 确实是该版本的 MV3 构建且与 `src/` 逐文件相符、description 不超过商店强制的 132 字符）。Chrome 比 AMO 宽容一点——**上传失败不会烧掉版本号**——但一个有问题的包进了审核队列照样要赔几天。
+
+`--dry-run` 会**真的去换一次 access token 并读一遍 item**，而不是只确认"Keychain 里有三个值"。有凭据和凭据能用是两回事：过期的 refresh token 一样安安静静躺在 Keychain 里，光看存在性的检查会一路放行到真正上传那一刻才炸。读 item 这一步顺带证明这个 token 属于**有权发布这个扩展**的账号。
 
 **截图和 listing 文案不在这条路径里**，它们不是 API 里的版本化产物，只能在后台改（素材在 `store/screenshots/`）。
 
