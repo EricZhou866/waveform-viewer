@@ -1,6 +1,6 @@
 # Waveform Viewer — 设计文档
 
-> 版本 1.4.3 · 对应源码 `src/content.js` (1990 行) / `src/page-hook.js` (258 行) / `src/background.js` (254 行)
+> 版本 1.5.0 · 对应源码 `src/content.js` (2044 行) / `src/page-hook.js` (258 行) / `src/background.js` (254 行)
 > 仓库 <https://github.com/EricZhou866/waveform-viewer> · MIT
 
 ---
@@ -128,7 +128,7 @@ const IS_PANEL = /-extension:$/.test(location.protocol);
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `src/content.js` | 1990 | 面板 UI、Lane 管理、时间轴、裁剪、播放、渲染、下载、设置 |
+| `src/content.js` | 2044 | 面板 UI、Lane 管理、时间轴、裁剪、播放、渲染、下载、设置 |
 | `src/page-hook.js` | 258 | 页面世界劫持，4 条发现路径 + 1 条补扫 |
 | `src/background.js` | 254 | 工具栏开关、CORS 代理、独立窗口所有权 |
 | `src/panel.html` | 13 | 独立窗口的空壳，只负责加载 `content.js` |
@@ -537,7 +537,39 @@ function joinAlign(lane) {
 
 按钮的高亮也改成跟 `aligned` 走，不再跟 `isTrimmed()`——`trimOnAlign` 关掉时一条都不会被裁，但状态确实是"已对齐"，用派生状态会显示成没对齐。
 
-### 9.4 关闭裁剪时的降级
+### 9.4 固定前导段（v1.5.0）
+
+设置项 `skipHead`（秒，0–10，默认 0 = 关）。站点经常在正式音频前放一段**每次都一样长**的东西——提示音、倒数、播报题号。这种东西不需要靠算法去找，它的长度是已知的，所以它是一个设置，不是一个检测问题。
+
+**关键在顺序：先去掉前导段，再做静音裁剪。** 实现上体现为 `soundBounds(lane, fromSec)` 的 `fromSec` 参数——搜索**从那里开始**，而不是全段搜完再把结果夹到 `fromSec`：
+
+```js
+function keepRegion(lane) {
+  const skip = Math.min(headSkip(), Math.max(0, dur - MIN_KEEP));
+  if (aligned && cfg.trimOnAlign && lane.peaks) {
+    const b = soundBounds(lane, skip);     // 不是 soundBounds(lane) 之后再夹
+    if (b) return b;
+  }
+  return skip > 0 ? { a: skip, b: dur } : null;
+}
+```
+
+两种写法在真实素材上差别很明显：
+
+| 写法 | 搜索范围 | 结果 |
+|------|---------|------|
+| 全段搜完再夹 | 0 → 末尾 | 起音点落在**提示音**上，夹到 `skip`，提示音后面那段停顿原样留着 |
+| 从 `skip` 开始搜 | `skip` → 末尾 | 起音点落在**真正的说话**上，中间的停顿一并裁掉 |
+
+回归测试用 0.8s 提示音 + 1.5s 停顿 + 说话 的素材量这个差别：`skip = 1.5` 时正确实现切掉 2.25s，错误实现只切掉 1.50s。
+
+还有一处容易漏：`soundBounds` 里算 `peak` 的循环也要从 `i0` 开始。提示音通常比人声响，让它参与归一化会抬高阈值，进而把后面真正的内容判成静音。
+
+**越界保护**：`MIN_KEEP = 0.5`，前导段再长也不会把整条轨切空——设成一个会清空轨的值时直接忽略，而不是照办。
+
+**Align 关掉时也生效**。去掉前导段是“这段我不要”，和“把几条轨对齐”是两件事，所以 `applyTrim()` 不受 `aligned` 约束；改设置走 `applyHeadSkip()`，只重算裁剪，**不碰 offset**——那不是一次对齐。
+
+### 9.5 关闭裁剪时的降级
 
 设置里可以关掉 "Align crops silence"。此时 Align 退化为**按起音点平移对齐**：
 
@@ -826,6 +858,7 @@ if (/INPUT|TEXTAREA|SELECT/.test(tag) || e.target.isContentEditable) return;
 | When full | Keep what is shown | 或 Replace the oldest |
 | Ignore clips shorter than | 2s | 0.5–10s，见 §6.5 |
 | Align on arrival | on | 新音频进来即裁剪对齐，见 §9.3 |
+| Skip the first | 0s | 0–10s，去掉每条音频开头的固定前导段，见 §9.4 |
 | Show extra buttons | off | 显示 `↔` `＋` `－` `⟳`，见 §12.1.1 |
 | Shared time scale | on | 关掉则每条独立缩放 |
 | Vertical zoom | Auto | 或 ×1 / ×2 / ×4 / ×8 |
@@ -1080,6 +1113,7 @@ Firefox 140+ 起，AMO 强制要求：
     "v": 3,                        // schema 版本，用于默认值迁移（见 §6.2.1）
     "maxLanes": 0,                 // 0 = 不限，硬顶 64
     "autoAlign": true,             // 新音频进来即裁剪对齐（见 §9.3）
+    "skipHead": 0,                 // 去掉开头多少秒，0–10，0 = 关（见 §9.4）
     "whenFull": "keep",            // "keep" | "replace"
     "sync": true,
     "gain": "auto",                // "auto" | 1 | 2 | 4 | 8
@@ -1116,7 +1150,7 @@ Firefox 140+ 起，AMO 强制要求：
 | **默认不限条数** | 上限截断的音频在界面上完全不可见，比滚动一长串更糟。代价是内存随会话增长，靠 `LANE_HARD_MAX = 64` 和滚动兜住。 |
 | **满了排队而不是丢弃** | 用户显式设了上限时才会发生。用户明确要求"不要直接丢弃"。代价是需要维护停车场和 `flushParked()`。 |
 | **全局统一增益** | 保住了响度的可比性，代价是特别小声的那条可能看不太清。 |
-| **一份 `content.js` 双模式** | 面板窗口和页内面板永不行为漂移。代价是文件大（1990 行），且到处要判 `IS_PANEL`。 |
+| **一份 `content.js` 双模式** | 面板窗口和页内面板永不行为漂移。代价是文件大（2044 行），且到处要判 `IS_PANEL`。 |
 | **`postMessage` 而非 `wrappedJSObject`** | 可移植。代价是数据必须可克隆，且必须当作不可信输入校验。 |
 | **不用外部库** | 包体 45KB，无供应链风险，商店审核简单。代价是 WAV 编码器、峰值计算、绘图全部手写。 |
 | **Shadow DOM + `!important`** | 页面 CSS 打不进来。代价是调试时得展开 shadow root。 |
@@ -1302,9 +1336,9 @@ npm i -D playwright && npx playwright install chromium
 node test/e2e.js
 ```
 
-64 项断言，覆盖：面板注入与版本号显示、Lane 区滚动、时长下限（默认 1s 下过滤 0.30s / 0.70s，调到 0.5s 后 0.70s 进来、0.30s 仍被挡，调到 2s 后已存在的 0.70s 轨被清掉）、设置项默认值与范围、设置底部的版本与仓库链接、grip 拖拽改面板尺寸并跨刷新持久化、**默认设置下 6 条音频全部成轨且列表在面板自身高度上滚动、队列为空**、音频到达即裁剪对齐（含关掉 Align 后新音频保持全长、再打开时连后到的那条一起裁）、八个把手的 cursor 取值、拖西边/北边时对边不动、grip 只改高度、SE 角同时改两边、尺寸跨刷新持久化、老 profile 的两档设置迁移、开关打开时只有被点击的标签页出面板（其他标签页不出）、关闭状态下新开的页面既没有面板也没被注入 hook、关闭后已注入的 hook 会闭嘴（在页面里数 `__wf` 消息）、重新打开后它会醒过来、工具栏全为图标且 Play/Files/Clear 相邻、扩展按钮默认隐藏且能由设置开关、折叠后宽度收缩、✕ 关闭面板并带走轨、重新打开时 hook 会补进那些从没注入过的标签页、弹出窗口 → `⇲ Dock` → 页内面板回来的整条回路、以及全程零 JS 错误。
+70 项断言，覆盖：面板注入与版本号显示、Lane 区滚动、时长下限（默认 1s 下过滤 0.30s / 0.70s，调到 0.5s 后 0.70s 进来、0.30s 仍被挡，调到 2s 后已存在的 0.70s 轨被清掉）、设置项默认值与范围、设置底部的版本与仓库链接、grip 拖拽改面板尺寸并跨刷新持久化、**默认设置下 6 条音频全部成轨且列表在面板自身高度上滚动、队列为空**、音频到达即裁剪对齐（含关掉 Align 后新音频保持全长、再打开时连后到的那条一起裁）、八个把手的 cursor 取值、拖西边/北边时对边不动、grip 只改高度、SE 角同时改两边、尺寸跨刷新持久化、老 profile 的两档设置迁移、开关打开时只有被点击的标签页出面板（其他标签页不出）、关闭状态下新开的页面既没有面板也没被注入 hook、关闭后已注入的 hook 会闭嘴（在页面里数 `__wf` 消息）、固定前导段的裁剪（含用来区分两种实现的那条断言：提示音后面的停顿也要一并裁掉）、重新打开后它会醒过来、工具栏全为图标且 Play/Files/Clear 相邻、扩展按钮默认隐藏且能由设置开关、折叠后宽度收缩、✕ 关闭面板并带走轨、重新打开时 hook 会补进那些从没注入过的标签页、弹出窗口 → `⇲ Dock` → 页内面板回来的整条回路、以及全程零 JS 错误。
 
-v1.4.3 全部通过，AMO linter 0/0/0。
+v1.5.0 全部通过，AMO linter 0/0/0。
 
 两个写测试时踩的坑：
 
@@ -1464,4 +1498,4 @@ npm run publish:chrome
 
 ---
 
-*文档对应 v1.4.3。修改代码时请同步更新本文档中受影响的小节（含 §3.2 的行数表与本行的版本号）。*
+*文档对应 v1.5.0。修改代码时请同步更新本文档中受影响的小节（含 §3.2 的行数表与本行的版本号）。*

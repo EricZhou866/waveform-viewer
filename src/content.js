@@ -21,6 +21,7 @@ const DEFAULTS = {
   maxLanes: 0,          // 0 = no cap: every clip gets a lane, and the list scrolls
   autoAlign: true,      // new audio arrives cropped and aligned
   showExtra: false,     // Shift / lane height / Rescan are off the toolbar
+  skipHead: 0,          // seconds of lead-in dropped from every clip (0 = off)
   whenFull: 'keep',     // 'keep' = never discard silently | 'replace' = evict oldest
   sync: true,           // one shared time scale across lanes
   gain: 'auto',         // 'auto' | 1 | 2 | 4 | 8
@@ -31,6 +32,12 @@ const DEFAULTS = {
 let cfg = Object.assign({}, DEFAULTS);
 const PEAK_RES  = 8192;
 const MIN_DUR_LO = 0.5, MIN_DUR_HI = 10;
+/* Lead-in to drop from the front of every clip. Sites commonly put a beep, a
+   count-in or an announcement before the audio itself, and it is the same
+   length every time — so it is a setting, not something to find by ear. */
+const HEAD_LO = 0, HEAD_HI = 10;
+const headSkip = () => Math.max(HEAD_LO, Math.min(HEAD_HI, Number(cfg.skipHead) || 0));
+const MIN_KEEP = 0.5;      // never skip so far that nothing usable is left
 /* Shortest clip worth a lane. User-settable because the right cut-off depends on
    the site: players fire silent primers of a few ms, but ad stingers and UI blips
    can run most of a second and are just as unwanted. */
@@ -380,10 +387,16 @@ function paintAllCursors() { for (const l of lanes.values()) paintCursor(l); }
 /* Align: crop the silence at both ends of every clip, then start them all at
    zero. Cropping is what actually lines the speech up — once the dead air is
    gone, "aligned" and "starts at 0" are the same thing. Click again to undo. */
-function soundBounds(lane) {
+/* `fromSec` is where the search starts: everything before it has already been
+   dropped as lead-in and must not take part. Clamping the answer afterwards is
+   not the same thing — a lead-in beep would still anchor the onset, and its
+   level would still set the threshold the real audio is measured against. */
+function soundBounds(lane, fromSec) {
   const { mins, maxs } = lane.peaks;
   const n = mins.length;
   if (!n) return null;
+  const from = Math.max(0, fromSec || 0);
+  const i0 = Math.max(0, Math.min(n - 1, Math.floor((from / (lane.duration || 1)) * n)));
 
   // Work on a smoothed envelope. A single click or a stray blip in the tail
   // should not keep two seconds of near-silence alive.
@@ -399,7 +412,7 @@ function soundBounds(lane) {
   }
 
   let peak = 0;
-  for (let i = 0; i < n; i++) if (sm[i] > peak) peak = sm[i];
+  for (let i = i0; i < n; i++) if (sm[i] > peak) peak = sm[i];
   if (peak < 1e-5) return null;
 
   const thr = peak * cfg.trimThresh;
@@ -408,13 +421,13 @@ function soundBounds(lane) {
   const run = Math.max(2, Math.round(n / 200));    // ~0.5% of the clip
 
   let a = -1;
-  for (let i = 0; i + run <= n; i++) {
+  for (let i = i0; i + run <= n; i++) {
     let held = true;
     for (let j = i; j < i + run; j++) if (sm[j] <= thr) { held = false; break; }
     if (held) { a = i; break; }
   }
   let b = -1;
-  for (let i = n - 1; i - run >= 0; i--) {
+  for (let i = n - 1; i - run >= i0; i--) {
     let held = true;
     for (let j = i; j > i - run; j--) if (sm[j] <= thr) { held = false; break; }
     if (held) { b = i; break; }
@@ -423,7 +436,7 @@ function soundBounds(lane) {
 
   const dur = lane.duration;
   const pad = 0.05;                                 // keep a hair of air
-  const A = Math.max(0, (a / n) * dur - pad);
+  const A = Math.max(from, (a / n) * dur - pad);
   const B = Math.min(dur, ((b + 1) / n) * dur + pad);
   if (B - A < 0.15) return null;                    // refuse silly-short crops
   return { a: A, b: B };
@@ -434,17 +447,46 @@ function alignOnsets() {
   applyAlign();
 }
 
+/* What a lane keeps: the configured lead-in comes off first, then Align crops
+   the silence out of whatever is left. The order is the whole point — see the
+   comment on soundBounds. Returns null for "keep all of it". */
+function keepRegion(lane) {
+  const dur = lane.duration || 0;
+  if (!dur) return null;
+  // A setting that would leave nothing is ignored, not obeyed.
+  const skip = Math.min(headSkip(), Math.max(0, dur - MIN_KEEP));
+  if (aligned && cfg.trimOnAlign && lane.peaks) {
+    const b = soundBounds(lane, skip);
+    if (b) return b;
+  }
+  return skip > 0 ? { a: skip, b: dur } : null;
+}
+
+function applyTrim(lane) {
+  if (!lane) return;
+  const r = keepRegion(lane);
+  if (r) { lane.trimA = r.a; lane.trimB = r.b; }
+  else { lane.trimA = 0; lane.trimB = null; }
+}
+
+/* The lead-in is dropped whether or not Align is on, so a change to it has to
+   reach every lane that is already on screen. Offsets are left alone: this is
+   not an alignment. */
+function applyHeadSkip() {
+  for (const l of lanes.values()) { applyTrim(l); paintMeta(l); }
+  refreshAll();
+}
+
 /* Bring one freshly-decoded lane into whatever state the panel is already in, so
    audio that shows up later needs no second click. Trimming is per-lane, so only
    the new lane is touched — a lane the user has shifted by hand stays put. The
    offset fallback has no such luxury: lining up onsets is a comparison across
    every lane, so that path re-runs the whole thing. */
 function joinAlign(lane) {
-  if (!aligned || !lane || !lane.peaks) return;
-  if (!cfg.trimOnAlign) { applyAlign(); return; }
-  const b = soundBounds(lane);
-  if (b) { lane.trimA = b.a; lane.trimB = b.b; } else { lane.trimA = 0; lane.trimB = null; }
-  lane.offset = 0;
+  if (!lane || !lane.peaks) return;
+  if (aligned && !cfg.trimOnAlign) { applyAlign(); return; }
+  applyTrim(lane);
+  if (aligned) lane.offset = 0;
   paintMeta(lane);
   refreshAll();
 }
@@ -456,17 +498,16 @@ function applyAlign() {
     l.selA = l.selB = null;
     l.regEl.style.display = 'none';
     l.selEl.textContent = '';
-    if (!on || !l.peaks || !cfg.trimOnAlign) { l.trimA = 0; l.trimB = null; continue; }
-    const b = soundBounds(l);
-    if (b) { l.trimA = b.a; l.trimB = b.b; } else { l.trimA = 0; l.trimB = null; }
+    applyTrim(l);
   }
   // With trimming off, fall back to lining up the onsets by offset instead.
   if (on && !cfg.trimOnAlign) {
     const info = [];
     for (const l of lanes.values()) {
       if (!l.peaks) continue;
-      const b = soundBounds(l);
-      info.push({ lane: l, onset: b ? b.a : 0 });
+      const skip = Math.min(headSkip(), Math.max(0, (l.duration || 0) - MIN_KEEP));
+      const b = soundBounds(l, skip);
+      info.push({ lane: l, onset: b ? b.a : skip });
     }
     if (info.length) {
       const target = Math.max(...info.map(x => x.onset));
@@ -845,6 +886,19 @@ function buildSettings(panel) {
   });
   row('Ignore clips shorter than', minIn,
       'Seconds, ' + MIN_DUR_LO + '\u2013' + MIN_DUR_HI + '. Keeps jingles and the silent primers players fire out of the way');
+
+  const skipIn = mk('input', { type: 'number', className: 'num', min: String(HEAD_LO),
+                               max: String(HEAD_HI), step: '0.5' });
+  skipIn.value = String(cfg.skipHead);
+  skipIn.addEventListener('change', () => {
+    const v = parseFloat(skipIn.value);
+    cfg.skipHead = isFinite(v) ? Math.max(HEAD_LO, Math.min(HEAD_HI, v)) : 0;
+    skipIn.value = String(cfg.skipHead);
+    saveSettings();
+    applyHeadSkip();
+  });
+  row('Skip the first', skipIn,
+      'Seconds cut off the front of every clip \u2014 the beep or count-in before the audio. 0 = keep it');
 
   const autoCb = mk('input', { type: 'checkbox' });
   autoCb.checked = !!cfg.autoAlign;

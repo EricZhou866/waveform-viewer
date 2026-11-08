@@ -67,6 +67,14 @@ window.playSet = async (list) => {
 };
 window.playSet(['ref.mp3', 'mine.mp3']);
 </script>`),
+  /* A lead-in that tells the two implementations apart: a loud beep, a gap,
+     then the speech. Cropping the silence first and clamping the answer to the
+     skip afterwards would leave the gap in (start at 1.5s); searching only past
+     the skip finds the speech itself (start at ~2.0s). */
+  'lead.mp3': wav([tone(0.8, 1000, 0.9), sil(1.5),
+                   tone(0.35, 220, 0.5), sil(0.1), tone(0.4, 300, 0.45), sil(0.12),
+                   tone(0.3, 260, 0.5), sil(0.1), tone(0.45, 240, 0.4), sil(0.1),
+                   tone(0.38, 280, 0.46), sil(0.3)]),
   'b.html': Buffer.from('<!doctype html><meta charset="utf-8"><title>quiet page</title><h3>no audio here</h3>'),
   't.html': Buffer.from(`<!doctype html><meta charset="utf-8"><title>web audio only</title>
 <h3>no &lt;audio&gt; element on this page</h3>
@@ -415,6 +423,51 @@ const SR = `(() => { const h = document.getElementById('__wf_viewer_host'); retu
   ok('switching it back on injects the hook into a tab that never had it',
      (await pageC.evaluate(`!!document.getElementById('__wf_viewer_host')`)) === true);
   await pageC.close();
+
+  /* Dropping a fixed lead-in off the front of every clip. */
+  const setField = async (label, v) => {
+    await page.evaluate(`(() => {
+        const row = [...${SR}.querySelectorAll('.sheet .row')]
+          .find(r => r.textContent.indexOf(${JSON.stringify(label)}) >= 0);
+        const i = row.querySelector('input[type=number]');
+        i.value = '${v}'; i.dispatchEvent(new Event('change'));
+      })()`);
+    await sleep(400);
+  };
+  const laneSecs = () => page.evaluate(
+    `parseFloat([...${SR}.querySelectorAll('.lane .meta')][0].textContent)`);
+
+  await page.evaluate(`${SR}.querySelector('[data-act="clear"]').click()`);
+  await sleep(300);
+  await page.evaluate(`window.playSet(['lead.mp3'])`);
+  await sleep(2400);
+  const whole = await laneSecs();
+  ok('the beep counts as sound, so nothing is cropped off the front yet', whole > 4.2, whole);
+
+  await page.evaluate(`${SR}.querySelector('[data-act="settings"]').click()`);
+  const skipField = await page.evaluate(`(() => {
+      const row = [...${SR}.querySelectorAll('.sheet .row')]
+        .find(r => r.textContent.indexOf('Skip the first') >= 0);
+      const i = row && row.querySelector('input[type=number]');
+      return i && { v: i.value, min: i.min, max: i.max }; })()`);
+  ok('the lead-in setting is there: default 0, range 0-10',
+     skipField && skipField.v === '0' && skipField.min === '0' && skipField.max === '10', skipField);
+
+  await setField('Skip the first', '1.5');
+  const skipped = await laneSecs();
+  ok('a 1.5s lead-in comes off', skipped < whole - 1.2, { whole, skipped });
+  // 0.8s beep, 1.5s gap, then the speech. Searching only past the skip lands on
+  // the speech at 2.3s, so about 2.25s comes off. Running the search over the
+  // whole clip and clamping the answer to 1.5s would leave the rest of the gap
+  // in and remove only the 1.5s — which is what this measures.
+  ok('the search starts past the lead-in, so the gap after the beep goes too',
+     whole - skipped > 1.9, { whole, skipped, removed: +(whole - skipped).toFixed(2) });
+  ok('the lane is marked as cropped', await page.evaluate(
+     `[...${SR}.querySelectorAll('.lane .meta')][0].textContent.indexOf('\u2702') >= 0`));
+
+  await setField('Skip the first', '0');
+  ok('setting it back to 0 restores the whole clip', (await laneSecs()) > 4.2, await laneSecs());
+  await page.evaluate(`${SR}.querySelector('[data-act="settings"]').click()`);
 
   /* Switching off has to stop the page-world hook, not just make this side
      ignore it. The hook computes peaks over every sample of every decoded

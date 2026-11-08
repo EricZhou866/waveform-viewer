@@ -94,6 +94,7 @@ brings it back.
 | Max lanes | 0 — no limit | Every clip gets a lane and the list scrolls. Set a number (1–64) if you would rather cap it; past the cap, new audio waits in a queue instead of being thrown away |
 | Ignore clips shorter than | 2 s | Anything shorter never gets a lane (0.5–10 s). Players fire silent primers before playback, and sites throw in UI blips and ad stingers; without a floor those crowd out what you are actually comparing. Lower it if you are working with very short clips — lanes already on screen are re-checked as soon as you change it |
 | Align on arrival | on | New audio comes in cropped to its sound and starting at zero, with no click. Turn it off to see clips at full length |
+| Skip the first | 0 s | Cuts a fixed lead-in off the front of every clip (0–10 s) — the beep, count-in or announcement a site plays before the audio itself. It comes off *before* the silence is cropped, so the pause after the beep goes with it |
 | Show extra buttons | off | Adds `↔`, `＋`, `－` and `⟳` to the toolbar |
 | When full | Keep what is shown | Only applies once you set a limit. New audio is **parked, never discarded** — it slots in as soon as you close a lane or raise the limit. Switch to "Replace the oldest" for the old behaviour |
 | Shared time scale | on | Lanes use one ruler so they line up vertically |
